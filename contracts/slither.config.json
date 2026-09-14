@@ -1,0 +1,5 @@
+{
+  "detectors_to_exclude": "solc-version,naming-convention,pragma,unimplemented-functions,unindexed-event-address-parameters",
+  "filter_paths": "lib/",
+  "exclude_dependencies": true
+}

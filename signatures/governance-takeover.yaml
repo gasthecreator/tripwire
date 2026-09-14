@@ -1,0 +1,25 @@
+# A single address's voting power spikes far beyond its baseline within
+# the window -- the flash-loaned-governance-token pattern used to pass a
+# malicious proposal in one atomic sequence. Historical precedent:
+# Beanstalk Farms (Apr 2022).
+id: governance-takeover
+description: >
+  An address's voting power increases far beyond its pre-transaction
+  baseline, immediately followed by a proposal-execution call sequence --
+  the "borrow governance tokens, vote, execute, repay" atomic pattern.
+category: governance_anomaly
+window_seconds: 15
+conditions:
+  - id: voting-power-spike
+    kind:
+      type: governance_proposal_anomaly
+      threshold_pct: 500.0
+    weight: 70.0
+  - id: immediate-execution
+    kind:
+      type: call_sequence
+      # propose(...) then execute(...)-shaped selectors; placeholder,
+      # filled in per protocol's actual governor contract during
+      # onboarding (docs/INTEGRATION.md).
+      selectors: ["0xda95691a", "0xfe0d94c1"]
+    weight: 30.0

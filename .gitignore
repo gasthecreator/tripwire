@@ -1,0 +1,26 @@
+# Rust
+/target
+Cargo.lock.bak
+**/*.rs.bk
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Foundry
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+!contracts/broadcast/**/dry-run/
+# Dependencies fetched via `forge install` (not git submodules -- see
+# CONTRIBUTING.md's setup step and the pinned versions noted there).
+contracts/lib/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp

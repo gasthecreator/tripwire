@@ -1,0 +1,24 @@
+# A single transaction moves a spot-price oracle far from a reference
+# price (TWAP or a second, independent oracle), then the watched
+# contract's own logic acts on that moved price within the same window.
+# Historical precedent: bZx (Feb 2020), Cream Finance (Oct 2021),
+# Mango Markets (Oct 2022).
+id: oracle-manipulation
+description: >
+  Reported spot price deviates sharply from a trusted reference within
+  the window, corroborated by a real fund outflow from acting on the
+  manipulated price -- price deviation alone is too common in real
+  markets (thin liquidity, legitimate volatility) to trigger without it.
+category: oracle_manipulation
+window_seconds: 10
+conditions:
+  - id: price-deviates-from-reference
+    kind:
+      type: oracle_price_deviation
+      threshold_pct: 25.0
+    weight: 55.0
+  - id: outflow-following-price-move
+    kind:
+      type: fund_flow_delta
+      threshold_pct: 15.0
+    weight: 40.0

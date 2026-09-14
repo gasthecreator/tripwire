@@ -1,0 +1,20 @@
+[package]
+name = "tripwire-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tripwire-daemon"
+path = "src/main.rs"
+
+[dependencies]
+tripwire-core.workspace = true
+chain-adapter.workspace = true
+detection.workspace = true
+guardian-client.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+alloy = { version = "0.9", features = ["full"] }

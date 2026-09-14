@@ -1,0 +1,18 @@
+[package]
+name = "chain-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tripwire-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait = "0.1"
+tokio.workspace = true
+tracing.workspace = true
+alloy = { version = "0.9", features = ["full"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "process"] }

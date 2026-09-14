@@ -1,0 +1,61 @@
+name: Foundry CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: forge fmt, build, test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: forge install
+        run: forge install
+
+      - name: forge fmt --check
+        run: forge fmt --check
+
+      - name: forge build
+        run: forge build --sizes
+
+      # Unit tests only (foundry.toml's default profile points `test` at
+      # test/unit) -- the fork-based historical-exploit replay suite
+      # under test/replay needs a real archive-RPC secret and runs in
+      # its own job below, gated on that secret being configured, so a
+      # fork without repo secrets still gets full unit coverage.
+      - name: forge test (unit)
+        run: forge test -vvv
+
+  replay:
+    name: forge test (historical exploit replay, needs ETH_RPC_URL secret)
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ vars.RUN_REPLAY_TESTS == 'true' }}
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: forge install
+        run: forge install
+
+      - name: forge test (replay, forked mainnet)
+        env:
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          FOUNDRY_PROFILE: replay
+        run: forge test -vvv

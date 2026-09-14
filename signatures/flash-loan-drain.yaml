@@ -1,0 +1,26 @@
+# A flash loan followed, within the same transaction, by a large outflow
+# from the watched contract. Neither signal alone is unusual -- flash
+# loans and large withdrawals both happen legitimately (arbitrage,
+# large depositor exits) -- the combination within one atomic
+# transaction is the anomaly. Historical precedent: Euler Finance
+# (Mar 2023), PancakeBunny (May 2021).
+id: flash-loan-drain
+description: >
+  A borrow/flashLoan-shaped call followed by a large, same-transaction
+  outflow from the watched contract's balance.
+category: flash_loan_drain
+window_seconds: 1
+conditions:
+  - id: flash-loan-entrypoint
+    kind:
+      type: call_sequence
+      # ERC-3156 flashLoan(address,address,uint256,bytes) selector,
+      # placeholder for the protocol-specific borrow entrypoint that
+      # would be filled in per deployment during onboarding.
+      selectors: ["0x5cffe9de"]
+    weight: 25.0
+  - id: large-outflow
+    kind:
+      type: fund_flow_delta
+      threshold_pct: 20.0
+    weight: 60.0

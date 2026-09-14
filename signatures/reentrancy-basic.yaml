@@ -1,0 +1,23 @@
+# Classic single-function reentrancy: an external call is made before a
+# state update, letting the callee re-enter the same function and repeat
+# the withdrawal before the first call's balance decrement lands.
+# Historical precedent: The DAO (2016), dForce (Feb 2020).
+id: reentrancy-basic
+description: >
+  Same (target, function-selector) pair is called again at a deeper point
+  in the same transaction's call trace than its first occurrence, paired
+  with a real fund outflow so a harmless recursive read doesn't also
+  trigger this.
+category: reentrancy
+window_seconds: 5
+conditions:
+  - id: reenters-same-function
+    kind:
+      type: reentrancy_depth
+      min_depth_delta: 1
+    weight: 65.0
+  - id: outflow-during-reentry
+    kind:
+      type: fund_flow_delta
+      threshold_pct: 5.0
+    weight: 30.0
