@@ -24,6 +24,39 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-14] Fix a real CI-only build-order bug (sol! macro needs contracts built first)
+
+**Author:** Claude Code
+
+**What:** After pushing the `alloy` 1.x upgrade, CI's `fmt, clippy, build`
+job still failed — a genuinely different bug from the two already fixed
+this session, not a flake. `guardian-client`'s `sol!` macro invocations
+(`tests/guardian_anvil.rs`) read `contracts/out/Guardian.sol/Guardian.json`
+and `.../GuardedVault.sol/GuardedVault.json` at **Rust compile time** to
+generate contract bindings, not only when the test actually runs. The
+`lint-and-build` job never ran `forge build`, so `cargo clippy
+--all-targets` (which compiles test binaries) failed with "failed to
+canonicalize path." This didn't surface locally earlier only because
+`contracts/out/` already existed on disk from prior `forge build` runs
+in this same working directory. Reproduced locally by deleting
+`contracts/out/` and re-running `cargo clippy` (confirmed the exact same
+failure), then fixed by adding Foundry setup + `forge build` to the
+`lint-and-build` job before the Rust steps, and documented the required
+build order (contracts before Rust, always) in `CONTRIBUTING.md` and
+`README.md`, since it isn't obvious.
+
+**Why:** Order-of-operations bugs like this are exactly what CI running
+on a genuinely clean checkout is for — a long-lived local working
+directory papers over exactly this class of bug.
+
+**Verified:** Reproduced the failure locally first (`rm -rf contracts/out
+&& cargo clippy -p guardian-client --all-targets` fails with the same
+error CI showed), then confirmed the fix resolves it (`forge build` then
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean). Full `cargo test --workspace` still green (78 tests).
+
+---
+
 ## [2026-09-14] Fix real CI failures: pinned deps + alloy upgrade for a real CVE
 
 **Author:** Claude Code

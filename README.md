@@ -99,19 +99,22 @@ docs/INTEGRATION.md  what a real protocol needs to do to adopt this
 Prerequisites: Rust (via [rustup](https://rustup.rs)), [Foundry](https://getfoundry.sh).
 
 ```bash
-# Rust workspace
-cargo build --workspace
-cargo test --workspace          # spawns real local anvil nodes for integration tests
-
-# Contracts
+# Contracts -- build these FIRST: guardian-client's sol! macro reads
+# contracts/out/*.json at Rust compile time, not just at test runtime.
 cd contracts
 forge install foundry-rs/forge-std@v1.16.2 --no-git
 forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
                                  # (contracts/lib/ is gitignored -- pinned versions, see CONTRIBUTING.md)
 forge build
 forge test -vvv                 # unit tests only, no network required
+cd ..
+
+# Rust workspace
+cargo build --workspace
+cargo test --workspace          # spawns real local anvil nodes for integration tests
 
 # Historical exploit replay (needs an archive-RPC URL, e.g. Alchemy free tier)
+cd contracts
 ETH_RPC_URL=<your-archive-rpc-url> FOUNDRY_PROFILE=replay forge test -vvv
 ```
 

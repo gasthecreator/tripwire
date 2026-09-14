@@ -22,6 +22,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # guardian-client's `sol!` macro invocations read the compiled
+      # contract JSON artifacts (contracts/out/*.json) at *compile time*
+      # to generate bindings -- this isn't just a test-runtime need, so
+      # even `cargo clippy`/`cargo build --all-targets` (which compile
+      # test binaries) require contracts/ built first.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: forge install && forge build
+        working-directory: contracts
+        run: |
+          forge install foundry-rs/forge-std@v1.16.2 --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
+          forge build
+
       - name: cargo fmt --check
         run: cargo fmt --all --check
 

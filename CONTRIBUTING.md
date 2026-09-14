@@ -65,6 +65,21 @@ build`/`forge test` behavior ever seems to disagree with what's
 documented here, checking installed
 versions against the two above is the first thing to rule out.
 
+Then build the contracts **before** touching the Rust workspace at all:
+
+```bash
+cd contracts && forge build
+```
+
+This isn't optional ordering — `guardian-client`'s `sol!` macro
+invocations read the compiled artifacts under `contracts/out/*.json` at
+Rust *compile time* to generate contract bindings, not just when its
+tests run. `cargo build`/`cargo clippy`/`cargo test` on the Rust
+workspace will fail with a "failed to canonicalize path" error if
+`contracts/out/` doesn't exist yet — this bit CI once already (see
+`WORKLOG.md`) before every relevant workflow job ran `forge build`
+first.
+
 ## Before opening a PR
 
 Rust (event listener / detection engine):
