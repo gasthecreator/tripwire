@@ -27,8 +27,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: foundry-rs/foundry-toolchain@v1
-      - run: forge install && forge build
-        working-directory: contracts
+      - working-directory: contracts
+        run: |
+          forge install foundry-rs/forge-std@v1.16.2 --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
+          forge build
       - uses: crytic/slither-action@v0.4.0
         id: slither
         with:

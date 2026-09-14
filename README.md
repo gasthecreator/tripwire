@@ -105,7 +105,9 @@ cargo test --workspace          # spawns real local anvil nodes for integration 
 
 # Contracts
 cd contracts
-forge install       # fetches forge-std + OpenZeppelin (gitignored, see CONTRIBUTING.md)
+forge install foundry-rs/forge-std@v1.16.2 --no-git
+forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
+                                 # (contracts/lib/ is gitignored -- pinned versions, see CONTRIBUTING.md)
 forge build
 forge test -vvv                 # unit tests only, no network required
 

@@ -9,8 +9,6 @@ use std::str::FromStr;
 use alloy::consensus::Transaction as _;
 use alloy::eips::BlockNumberOrTag;
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
-use alloy::rpc::types::BlockTransactionsKind;
-use alloy::transports::http::{Client, Http};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -20,7 +18,7 @@ use crate::{ChainAdapter, ChainAdapterError};
 
 pub struct EvmAdapter {
     chain_id: ChainId,
-    provider: RootProvider<Http<Client>>,
+    provider: RootProvider,
     /// Whether this node answers `debug_traceTransaction`. Not every RPC
     /// endpoint exposes the debug namespace (most public free-tier
     /// endpoints don't); when it's unavailable, call-frame-dependent
@@ -38,7 +36,14 @@ impl EvmAdapter {
         let url = rpc_url
             .parse()
             .map_err(|e| ChainAdapterError::Transport(format!("invalid RPC URL: {e}")))?;
-        let provider = ProviderBuilder::new().on_http(url);
+        // No fillers needed -- this adapter only reads chain state, it
+        // never signs or sends transactions (that's guardian-client's
+        // job). `disable_recommended_fillers()` keeps the provider type
+        // a plain `RootProvider` instead of a filler-wrapped type this
+        // struct would otherwise have to name.
+        let provider = ProviderBuilder::new()
+            .disable_recommended_fillers()
+            .connect_http(url);
         Ok(Self {
             chain_id,
             provider,
@@ -175,10 +180,8 @@ impl ChainAdapter for EvmAdapter {
         let head = self.latest_block_number().await?;
         let block = self
             .provider
-            .get_block_by_number(
-                BlockNumberOrTag::Number(block_number),
-                BlockTransactionsKind::Full,
-            )
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .full()
             .await
             .map_err(|e| ChainAdapterError::Transport(e.to_string()))?
             .ok_or(ChainAdapterError::BlockNotFound(block_number))?;
@@ -193,8 +196,8 @@ impl ChainAdapter for EvmAdapter {
 
         for tx in block.transactions.txns() {
             let tx_hash = format!("{:#x}", tx.inner.tx_hash());
-            let from =
-                CoreAddress::from_str(&format!("{:#x}", tx.from)).unwrap_or(CoreAddress::ZERO);
+            let from = CoreAddress::from_str(&format!("{:#x}", tx.inner.signer()))
+                .unwrap_or(CoreAddress::ZERO);
             let to = tx
                 .inner
                 .to()

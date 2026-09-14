@@ -172,6 +172,18 @@ is also excluded — a confirmed Slither false positive on
 `override(Pausable, IPausable)` and compiles and runs correctly; Slither's
 resolver doesn't always cross-reference multi-parent `view` overrides.
 
+The Rust workspace is scanned with `cargo audit`
+(`.github/workflows/security-scans.yml`). As of this writing there are
+zero errors (real, actionable vulnerabilities) — a real `ruint` issue
+(RUSTSEC-2026-0220, RUSTSEC-2025-0137) surfaced during initial
+development and was fixed by upgrading the whole workspace from `alloy`
+0.9 to 1.x, not suppressed. Three warning-level advisories remain,
+accepted as transitive alloy dependencies outside this project's direct
+control: `derivative`/`paste` (unmaintained, not unsound) and `lru`
+(RUSTSEC-2026-0253, a panic-safety issue in `LruCache::pop()` — this
+project doesn't call that API directly, only alloy's internal RPC
+caching does).
+
 ## 4. Out of scope for this project
 
 - Formal verification of the Solidity contracts.

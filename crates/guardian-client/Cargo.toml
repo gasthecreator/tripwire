@@ -9,7 +9,7 @@ tripwire-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-alloy = { version = "0.9", features = ["full"] }
+alloy = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "process"] }

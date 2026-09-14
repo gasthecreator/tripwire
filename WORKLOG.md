@@ -24,6 +24,47 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-14] Fix real CI failures: pinned deps + alloy upgrade for a real CVE
+
+**Author:** Claude Code
+
+**What:** Opened PR #1 for the detection-wiring work and its first CI run
+surfaced two genuine bugs, not flakes: (1) `forge install` with no
+arguments is a no-op when dependencies were fetched with `--no-git` (no
+`.gitmodules` recorded) — every workflow and doc now runs the two
+explicit pinned installs (`forge-std@v1.16.2`,
+`openzeppelin-contracts@v5.7.0`) instead; (2) `cargo audit` found two
+real vulnerabilities in `ruint` (RUSTSEC-2026-0220, RUSTSEC-2025-0137),
+transitively pinned by `alloy` 0.9.2. Fixed by upgrading the whole
+workspace from `alloy` 0.9 to 1.x (currently resolving to 1.8.3) across
+`chain-adapter`, `guardian-client`, and `tripwire-daemon`, which also
+let the earlier serde version pin (`=1.0.219`, worked around an
+`alloy-consensus` 0.9.2 / newer-serde incompatibility) be removed
+entirely. Fixed the resulting API breaks: `RootProvider`/`Provider` lost
+their transport type parameter, `.on_http()` → `.connect_http()`,
+`.with_recommended_fillers()` is gone (fillers on by default now, use
+`.disable_recommended_fillers()` for a read-only provider),
+`get_block_by_number` takes one argument now (`.full()` chained
+separately), and RPC `Transaction.from` moved back under
+`.inner.signer()`.
+
+**Why:** A security product shipping with a Cargo.lock pinned to
+dependencies with known CVEs would fail exactly the due-diligence
+review this project is supposed to survive — upgrading was the right
+call over suppressing the audit finding.
+
+**Verified:** `cargo audit` exit code 0 (zero errors; three
+warning-level unmaintained/unsound-but-inapplicable advisories remain,
+documented in `SECURITY.md` §3.1). `cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets --all-features -- -D warnings`, `cargo
+test --workspace` (78 tests), `forge fmt --check`, and `forge test` (19
+tests) all clean after the upgrade — including the real end-to-end test
+that deploys actual contracts to a live `anvil` node and pauses them via
+`guardian-client`, which kept working unchanged through the alloy major
+version bump.
+
+---
+
 ## [2026-09-14] Wire the Beanstalk replay into the real detection engine
 
 **Author:** Claude Code

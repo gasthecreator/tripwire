@@ -62,7 +62,7 @@ fn try_spawn_anvil(port: u16) -> Option<AnvilGuard> {
 
 async fn wait_for_anvil_ready(rpc_url: &str) -> bool {
     for _ in 0..50 {
-        let provider = ProviderBuilder::new().on_http(rpc_url.parse().unwrap());
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
         if provider.get_block_number().await.is_ok() {
             return true;
         }
@@ -100,9 +100,8 @@ async fn guardian_client_pauses_a_real_deployed_vault_end_to_end() {
     let pauser_address = pauser_signer.address();
 
     let admin_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
         .wallet(EthereumWallet::from(admin_signer))
-        .on_http(rpc_url.parse().unwrap());
+        .connect_http(rpc_url.parse().unwrap());
 
     // Deploy Guardian with `admin` as DEFAULT_ADMIN_ROLE (a plain EOA
     // here for test simplicity; ARCHITECTURE.md §3.4 calls for a
@@ -120,7 +119,7 @@ async fn guardian_client_pauses_a_real_deployed_vault_end_to_end() {
         .expect("failed to deploy GuardedVault to local anvil");
 
     // Admin grants PAUSER_ROLE to the hot wallet and registers the vault.
-    let pauser_role = guardian.PAUSER_ROLE().call().await.unwrap()._0;
+    let pauser_role = guardian.PAUSER_ROLE().call().await.unwrap();
     guardian
         .grantRole(pauser_role, pauser_address)
         .send()
@@ -138,7 +137,7 @@ async fn guardian_client_pauses_a_real_deployed_vault_end_to_end() {
         .await
         .unwrap();
 
-    assert!(!vault.paused().call().await.unwrap()._0);
+    assert!(!vault.paused().call().await.unwrap());
 
     // Now drive the real guardian-client crate, signed by the pauser
     // key -- exactly what the daemon would do once detection crosses
@@ -172,7 +171,7 @@ async fn guardian_client_pauses_a_real_deployed_vault_end_to_end() {
     // The real, on-chain, end-to-end assertion: the vault is now paused,
     // reached entirely through guardian-client's own submission path,
     // not by calling the contract directly.
-    assert!(vault.paused().call().await.unwrap()._0);
+    assert!(vault.paused().call().await.unwrap());
 
     // And a non-pauser address still cannot repeat this via the same
     // client code path pointed at a different key.

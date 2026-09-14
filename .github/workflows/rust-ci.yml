@@ -55,7 +55,8 @@ jobs:
       - name: forge install && forge build
         working-directory: contracts
         run: |
-          forge install
+          forge install foundry-rs/forge-std@v1.16.2 --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
           forge build
 
       - name: cargo test --workspace

@@ -55,7 +55,7 @@ fn try_spawn_anvil() -> Option<AnvilGuard> {
 
 async fn wait_for_anvil_ready(rpc_url: &str) -> bool {
     for _ in 0..50 {
-        let provider = ProviderBuilder::new().on_http(rpc_url.parse().unwrap());
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse().unwrap());
         if provider.get_block_number().await.is_ok() {
             return true;
         }
@@ -90,9 +90,8 @@ async fn evm_adapter_decodes_a_real_anvil_transaction() {
 
     let wallet = EthereumWallet::from(signer);
     let wallet_provider = ProviderBuilder::new()
-        .with_recommended_fillers()
         .wallet(wallet)
-        .on_http(rpc_url.parse().unwrap());
+        .connect_http(rpc_url.parse().unwrap());
 
     let tx = TransactionRequest::default()
         .with_to(recipient)
