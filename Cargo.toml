@@ -6,6 +6,7 @@ members = [
     "crates/detection",
     "crates/guardian-client",
     "crates/tripwire-daemon",
+    "crates/replay-harness",
 ]
 
 [workspace.package]

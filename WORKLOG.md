@@ -24,6 +24,44 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-14] Wire the Beanstalk replay into the real detection engine
+
+**Author:** Claude Code
+
+**What:** Created `~/tripwire`'s GitHub remote (`gasthecreator/tripwire`,
+public) and established `main` from the initial scaffold commit (a
+repo-genesis exception to the branch+PR rule — nothing existed to review
+against yet). Built `crates/replay-harness`: fetches the real Beanstalk
+exploit transaction's actual decoded call trace from a real archive RPC
+(via `chain-adapter`) and scores it through the real `detection` engine,
+closing the gap the previous session's Solidity-only fork replay left
+open (proving the transaction *replays* is not the same as proving the
+*detector would have fired*). The signature used is built from two
+independently-verified real selectors: `emergencyCommit(uint32)`
+(`0x73015684`), computed locally from the exact function signature
+quoted from Beanstalk's own public source (`GovernanceFacet.sol`,
+commit `ee4720cdb449d5b6ff2b789083792c4395628674`,
+github.com/BeanstalkFarms/Beanstalk), and Aave V2's standard
+`executeOperation` flash-loan callback (`0x920f5c84`, a fixed public
+interface, not incident-specific). Added a `replay` job to
+`rust-ci.yml`, gated the same way as `foundry-ci.yml`'s replay job.
+
+**Why:** Gideon flagged this as the highest-value remaining piece after
+reviewing the initial scaffold's honest gap list — the brief's core
+validation claim ("prove the system would have detected... within your
+stated latency target") wasn't actually proven by a Solidity-only replay
+that never touched the Rust detector.
+
+**Verified:** `cargo build -p replay-harness --tests` and `cargo clippy
+--workspace --all-targets --all-features -- -D warnings` clean.
+`cargo test --workspace` green (78 tests). The new test's no-RPC-key
+skip path runs and exits cleanly, matching every other network-dependent
+test in this repo — but **the test has not yet executed against live
+data**, since no archive-RPC key is configured yet. That's the honest
+state to log here, not "done."
+
+---
+
 ## [2026-09-14] Full first implementation pass: detection engine, guardian contracts, end-to-end wiring
 
 **Author:** Claude Code
