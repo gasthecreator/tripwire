@@ -42,7 +42,7 @@ this README:
 | Chain adapter (EVM, block/tx normalization, call-trace decoding) | Real, tested against a live local `anvil` node (not mocked) |
 | Guardian contract + demo target (`Guardian.sol`, `GuardedVault.sol`) | Real, OpenZeppelin-based, 19 tests incl. fuzzing and a live reentrancy attack simulation, Slither-clean (one accepted, documented finding) |
 | End-to-end wiring (listener → detection → on-chain pause) | Real — `crates/tripwire-daemon`, and proven by an integration test that deploys the actual contracts to a live `anvil` node and pauses them through the real `guardian-client` code path |
-| Historical exploit replay (the brief's core validation requirement) | **Partial.** One case (Beanstalk, Apr 2022) verified against Etherscan and replays successfully on a real mainnet fork. Three more signature-diversity cases (flash-loan, oracle-manipulation, reentrancy) are scaffolded but explicitly left unverified rather than filled with unconfirmed data — see `PLAN.md` |
+| Historical exploit replay (the brief's core validation requirement) | **Partial.** One case (Beanstalk, Apr 2022) verified against Etherscan; replays successfully on a real mainnet fork (Solidity), and its real decoded call trace scores above threshold in the actual Rust detection engine (`crates/replay-harness`) using two independently-verified real function selectors. Neither has actually run against live data yet — both are blocked on an archive-RPC key. Three more signature-diversity cases (flash-loan, oracle-manipulation, reentrancy) are scaffolded but explicitly left unverified rather than filled with unconfirmed data — see `PLAN.md` |
 | Baseline computation (real balance/price/voting-power context feeding the detection conditions) | **Placeholder.** The daemon currently evaluates signatures against a default/empty `Baseline` — the scoring math is real and tested, but live chain-state sourcing for it isn't wired yet |
 | False-positive rate against real legitimate traffic | **Not yet measured** at the historical-replay level (blocked on the same archive-RPC access as the exploit replays); the detection engine's own unit tests include several explicit "this should NOT fire" cases as an interim signal |
 
@@ -83,6 +83,8 @@ crates/
   detection/         signature loading, condition evaluation, confidence scoring
   guardian-client/   signs and submits pause transactions
   tripwire-daemon/   the binary that wires the above together
+  replay-harness/    fetches real historical transactions and scores their
+                      real call traces through the real detection engine
 contracts/
   src/Guardian.sol         on-chain pause authority
   src/GuardedVault.sol     demo pausable target
@@ -97,17 +99,22 @@ docs/INTEGRATION.md  what a real protocol needs to do to adopt this
 Prerequisites: Rust (via [rustup](https://rustup.rs)), [Foundry](https://getfoundry.sh).
 
 ```bash
+# Contracts -- build these FIRST: guardian-client's sol! macro reads
+# contracts/out/*.json at Rust compile time, not just at test runtime.
+cd contracts
+forge install foundry-rs/forge-std@v1.16.2 --no-git
+forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
+                                 # (contracts/lib/ is gitignored -- pinned versions, see CONTRIBUTING.md)
+forge build
+forge test -vvv                 # unit tests only, no network required
+cd ..
+
 # Rust workspace
 cargo build --workspace
 cargo test --workspace          # spawns real local anvil nodes for integration tests
 
-# Contracts
-cd contracts
-forge install       # fetches forge-std + OpenZeppelin (gitignored, see CONTRIBUTING.md)
-forge build
-forge test -vvv                 # unit tests only, no network required
-
 # Historical exploit replay (needs an archive-RPC URL, e.g. Alchemy free tier)
+cd contracts
 ETH_RPC_URL=<your-archive-rpc-url> FOUNDRY_PROFILE=replay forge test -vvv
 ```
 

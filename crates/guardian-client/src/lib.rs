@@ -9,11 +9,10 @@
 
 use std::str::FromStr;
 
-use alloy::network::{Ethereum, EthereumWallet};
+use alloy::network::EthereumWallet;
 use alloy::primitives::Address as AlloyAddress;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::sol;
-use alloy::transports::http::{Client, Http};
 use thiserror::Error;
 use tripwire_core::PauseDecision;
 
@@ -53,11 +52,11 @@ pub enum GuardianClientError {
 /// registered target" — see SECURITY.md T1. This client has no unpause
 /// path at all: unpausing is deliberately a separate, timelock-gated
 /// flow it doesn't participate in (ARCHITECTURE.md §3.4).
-pub struct GuardianClient<P: Provider<Http<Client>, Ethereum>> {
-    contract: IGuardian::IGuardianInstance<Http<Client>, P>,
+pub struct GuardianClient<P: Provider> {
+    contract: IGuardian::IGuardianInstance<P>,
 }
 
-impl<P: Provider<Http<Client>, Ethereum>> GuardianClient<P> {
+impl<P: Provider> GuardianClient<P> {
     /// Connects using an already-constructed provider — the entry point
     /// tests use to inject a provider pointed at a local `anvil` node,
     /// and that a real daemon could also use to share one provider
@@ -131,7 +130,6 @@ impl<P: Provider<Http<Client>, Ethereum>> GuardianClient<P> {
             .registeredTargets(address)
             .call()
             .await
-            .map(|r| r._0)
             .map_err(|e| GuardianClientError::Submission(e.to_string()))
     }
 }
@@ -145,7 +143,7 @@ pub async fn connect(
     rpc_url: &str,
     guardian_address: &str,
     pauser_private_key: &str,
-) -> Result<GuardianClient<impl Provider<Http<Client>, Ethereum>>, GuardianClientError> {
+) -> Result<GuardianClient<impl Provider>, GuardianClientError> {
     let url = rpc_url
         .parse()
         .map_err(|e| GuardianClientError::InvalidUrl(format!("{e}")))?;
@@ -153,10 +151,10 @@ pub async fn connect(
         .map_err(|e| GuardianClientError::InvalidKey(e.to_string()))?;
     let wallet = EthereumWallet::from(signer);
 
-    let provider = ProviderBuilder::new()
-        .with_recommended_fillers()
-        .wallet(wallet)
-        .on_http(url);
+    // Gas/nonce/chain-id/wallet fillers are on by default as of alloy
+    // 1.x (previously required an explicit `.with_recommended_fillers()`
+    // call, removed here as part of the alloy 0.9 -> 1.x upgrade).
+    let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
 
     GuardianClient::from_provider(guardian_address, provider)
 }

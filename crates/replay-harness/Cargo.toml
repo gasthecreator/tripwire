@@ -1,0 +1,11 @@
+[package]
+name = "replay-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tripwire-core.workspace = true
+chain-adapter.workspace = true
+detection.workspace = true
+tokio.workspace = true

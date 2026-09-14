@@ -24,6 +24,118 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-14] Fix a real CI-only build-order bug (sol! macro needs contracts built first)
+
+**Author:** Claude Code
+
+**What:** After pushing the `alloy` 1.x upgrade, CI's `fmt, clippy, build`
+job still failed — a genuinely different bug from the two already fixed
+this session, not a flake. `guardian-client`'s `sol!` macro invocations
+(`tests/guardian_anvil.rs`) read `contracts/out/Guardian.sol/Guardian.json`
+and `.../GuardedVault.sol/GuardedVault.json` at **Rust compile time** to
+generate contract bindings, not only when the test actually runs. The
+`lint-and-build` job never ran `forge build`, so `cargo clippy
+--all-targets` (which compiles test binaries) failed with "failed to
+canonicalize path." This didn't surface locally earlier only because
+`contracts/out/` already existed on disk from prior `forge build` runs
+in this same working directory. Reproduced locally by deleting
+`contracts/out/` and re-running `cargo clippy` (confirmed the exact same
+failure), then fixed by adding Foundry setup + `forge build` to the
+`lint-and-build` job before the Rust steps, and documented the required
+build order (contracts before Rust, always) in `CONTRIBUTING.md` and
+`README.md`, since it isn't obvious.
+
+**Why:** Order-of-operations bugs like this are exactly what CI running
+on a genuinely clean checkout is for — a long-lived local working
+directory papers over exactly this class of bug.
+
+**Verified:** Reproduced the failure locally first (`rm -rf contracts/out
+&& cargo clippy -p guardian-client --all-targets` fails with the same
+error CI showed), then confirmed the fix resolves it (`forge build` then
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+clean). Full `cargo test --workspace` still green (78 tests).
+
+---
+
+## [2026-09-14] Fix real CI failures: pinned deps + alloy upgrade for a real CVE
+
+**Author:** Claude Code
+
+**What:** Opened PR #1 for the detection-wiring work and its first CI run
+surfaced two genuine bugs, not flakes: (1) `forge install` with no
+arguments is a no-op when dependencies were fetched with `--no-git` (no
+`.gitmodules` recorded) — every workflow and doc now runs the two
+explicit pinned installs (`forge-std@v1.16.2`,
+`openzeppelin-contracts@v5.7.0`) instead; (2) `cargo audit` found two
+real vulnerabilities in `ruint` (RUSTSEC-2026-0220, RUSTSEC-2025-0137),
+transitively pinned by `alloy` 0.9.2. Fixed by upgrading the whole
+workspace from `alloy` 0.9 to 1.x (currently resolving to 1.8.3) across
+`chain-adapter`, `guardian-client`, and `tripwire-daemon`, which also
+let the earlier serde version pin (`=1.0.219`, worked around an
+`alloy-consensus` 0.9.2 / newer-serde incompatibility) be removed
+entirely. Fixed the resulting API breaks: `RootProvider`/`Provider` lost
+their transport type parameter, `.on_http()` → `.connect_http()`,
+`.with_recommended_fillers()` is gone (fillers on by default now, use
+`.disable_recommended_fillers()` for a read-only provider),
+`get_block_by_number` takes one argument now (`.full()` chained
+separately), and RPC `Transaction.from` moved back under
+`.inner.signer()`.
+
+**Why:** A security product shipping with a Cargo.lock pinned to
+dependencies with known CVEs would fail exactly the due-diligence
+review this project is supposed to survive — upgrading was the right
+call over suppressing the audit finding.
+
+**Verified:** `cargo audit` exit code 0 (zero errors; three
+warning-level unmaintained/unsound-but-inapplicable advisories remain,
+documented in `SECURITY.md` §3.1). `cargo fmt --all --check`, `cargo
+clippy --workspace --all-targets --all-features -- -D warnings`, `cargo
+test --workspace` (78 tests), `forge fmt --check`, and `forge test` (19
+tests) all clean after the upgrade — including the real end-to-end test
+that deploys actual contracts to a live `anvil` node and pauses them via
+`guardian-client`, which kept working unchanged through the alloy major
+version bump.
+
+---
+
+## [2026-09-14] Wire the Beanstalk replay into the real detection engine
+
+**Author:** Claude Code
+
+**What:** Created `~/tripwire`'s GitHub remote (`gasthecreator/tripwire`,
+public) and established `main` from the initial scaffold commit (a
+repo-genesis exception to the branch+PR rule — nothing existed to review
+against yet). Built `crates/replay-harness`: fetches the real Beanstalk
+exploit transaction's actual decoded call trace from a real archive RPC
+(via `chain-adapter`) and scores it through the real `detection` engine,
+closing the gap the previous session's Solidity-only fork replay left
+open (proving the transaction *replays* is not the same as proving the
+*detector would have fired*). The signature used is built from two
+independently-verified real selectors: `emergencyCommit(uint32)`
+(`0x73015684`), computed locally from the exact function signature
+quoted from Beanstalk's own public source (`GovernanceFacet.sol`,
+commit `ee4720cdb449d5b6ff2b789083792c4395628674`,
+github.com/BeanstalkFarms/Beanstalk), and Aave V2's standard
+`executeOperation` flash-loan callback (`0x920f5c84`, a fixed public
+interface, not incident-specific). Added a `replay` job to
+`rust-ci.yml`, gated the same way as `foundry-ci.yml`'s replay job.
+
+**Why:** Gideon flagged this as the highest-value remaining piece after
+reviewing the initial scaffold's honest gap list — the brief's core
+validation claim ("prove the system would have detected... within your
+stated latency target") wasn't actually proven by a Solidity-only replay
+that never touched the Rust detector.
+
+**Verified:** `cargo build -p replay-harness --tests` and `cargo clippy
+--workspace --all-targets --all-features -- -D warnings` clean.
+`cargo test --workspace` green (78 tests). The new test's no-RPC-key
+skip path runs and exits cleanly, matching every other network-dependent
+test in this repo — but **the test has not yet executed against live
+data**, since no archive-RPC key is configured yet. That's the honest
+state to log here, not "done."
+
+---
+
 ## [2026-09-14] Full first implementation pass: detection engine, guardian contracts, end-to-end wiring
 
 **Author:** Claude Code

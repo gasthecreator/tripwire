@@ -18,9 +18,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use alloy::network::Ethereum;
 use alloy::providers::Provider;
-use alloy::transports::http::{Client, Http};
 use chain_adapter::evm::EvmAdapter;
 use chain_adapter::ChainAdapter;
 use detection::Baseline;
@@ -117,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn poll_once<P: Provider<Http<Client>, Ethereum>>(
+async fn poll_once<P: Provider>(
     adapter: &EvmAdapter,
     guardian: &guardian_client::GuardianClient<P>,
     signatures: &[tripwire_core::Signature],

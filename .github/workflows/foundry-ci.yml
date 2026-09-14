@@ -22,7 +22,9 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
 
       - name: forge install
-        run: forge install
+        run: |
+          forge install foundry-rs/forge-std@v1.16.2 --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
 
       - name: forge fmt --check
         run: forge fmt --check
@@ -52,7 +54,9 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
 
       - name: forge install
-        run: forge install
+        run: |
+          forge install foundry-rs/forge-std@v1.16.2 --no-git
+          forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
 
       - name: forge test (replay, forked mainnet)
         env:

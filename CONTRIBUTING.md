@@ -49,15 +49,36 @@ that's the record of real engineering judgment, not something to clean up.
 than committed or vendored as git submodules — fetch it once with:
 
 ```bash
-cd contracts && forge install
+cd contracts
+forge install foundry-rs/forge-std@v1.16.2 --no-git
+forge install OpenZeppelin/openzeppelin-contracts@v5.7.0 --no-git
 ```
 
-This repo was built and tested against **forge-std v1.16.2** and
-**OpenZeppelin Contracts v5.7.0**; `forge install` without pinned refs
-fetches each dependency's current default branch, which may drift ahead
-of those versions over time. If `forge build`/`forge test` behavior ever
-seems to disagree with what's documented here, checking installed
+Pinned tags, not bare `forge install`: these repos were fetched with
+`--no-git` (no `.gitmodules` entry is recorded), so a bare `forge
+install` with no arguments has nothing to reinstall from and silently
+does nothing — every CI workflow in `.github/workflows/` runs the two
+explicit commands above for exactly this reason; don't simplify them
+back to a bare `forge install` without also either committing
+`.gitmodules` or otherwise recording what to fetch. If `forge
+build`/`forge test` behavior ever seems to disagree with what's
+documented here, checking installed
 versions against the two above is the first thing to rule out.
+
+Then build the contracts **before** touching the Rust workspace at all:
+
+```bash
+cd contracts && forge build
+```
+
+This isn't optional ordering — `guardian-client`'s `sol!` macro
+invocations read the compiled artifacts under `contracts/out/*.json` at
+Rust *compile time* to generate contract bindings, not just when its
+tests run. `cargo build`/`cargo clippy`/`cargo test` on the Rust
+workspace will fail with a "failed to canonicalize path" error if
+`contracts/out/` doesn't exist yet — this bit CI once already (see
+`WORKLOG.md`) before every relevant workflow job ran `forge build`
+first.
 
 ## Before opening a PR
 

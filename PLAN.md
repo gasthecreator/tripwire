@@ -11,14 +11,21 @@ Core system is real and tested end-to-end against live local
 infrastructure: detection engine, chain adapter, guardian contracts, and
 the daemon wiring all pass, including a test that deploys the actual
 compiled contracts to a live `anvil` node and pauses them through the
-real Rust `guardian-client` code path. The two gaps that matter most for
-anyone evaluating this beyond a portfolio context: (1) only one of the
-four planned historical exploits has a verified transaction hash/block
-number and an actual fork replay; (2) the daemon's `Baseline` (the real
-chain-state context that feeds fund-flow/oracle/governance conditions)
-is currently a placeholder — the scoring math itself is real and tested,
-but live sourcing for its inputs isn't wired yet. Both are called out
-in `README.md`'s status table, not just here.
+real Rust `guardian-client` code path. One historical exploit (Beanstalk,
+Apr 2022) is verified against Etherscan, replays against a real mainnet
+fork on the Solidity side, and — as of this update — has its real
+decoded call trace scored by the actual `detection` engine on the Rust
+side too (`crates/replay-harness`), using two independently-verified
+real function selectors. The gaps that matter most for anyone evaluating
+this beyond a portfolio context: (1) none of this replay/detection
+validation has actually *executed* against live data yet — it's real,
+compiling, tested-for-the-skip-path code blocked on an archive-RPC key;
+(2) three of four planned historical exploits still lack a verified
+tx hash; (3) the daemon's `Baseline` (the real chain-state context
+feeding fund-flow/oracle/governance conditions) is a placeholder — the
+scoring math is real and tested, but live sourcing for its inputs isn't
+wired yet. All three are called out in `README.md`'s status table, not
+just here.
 
 ## Build checklist, in slices
 
@@ -106,13 +113,23 @@ before merge, docs updated in the same PR as the code they describe.
       searches during this session confirmed dates and mechanisms for
       Euler and Cream but not a specific first-attack transaction hash
       with enough confidence to assert as fact in a security product's
-      own test suite. **Also not yet done:** wiring the replayed fork's
-      captured call trace through the actual `detection` crate to
-      assert a confidence score crosses threshold — today's Beanstalk
-      test proves the replay mechanics work (the real transaction
-      succeeds against a fork at the right block); it does not yet
-      prove the Rust detector would have scored it. That cross-language
-      wiring is the concrete next step for this slice.
+      own test suite. **Cross-language detection wiring is now done for
+      this one case:** `crates/replay-harness/tests/beanstalk_governance_exploit.rs`
+      fetches the real transaction's actual decoded call trace (via
+      `chain-adapter`, from a real archive RPC) and runs it through the
+      real `detection` engine, using a signature built from two
+      independently-verified real selectors — `emergencyCommit(uint32)`
+      (`0x73015684`, computed from the exact function signature quoted
+      from Beanstalk's own public source, `GovernanceFacet.sol` at
+      commit `ee4720cdb449d5b6ff2b789083792c4395628674`) and Aave V2's
+      standard flash-loan callback (`0x920f5c84`, a fixed public
+      interface, not incident-specific). The test asserts both
+      selectors are actually present in the real trace and that the
+      resulting confidence crosses threshold. **Still blocked on the
+      archive-RPC key to actually execute** — the code compiles and its
+      no-RPC skip path is verified, but it hasn't run against live data
+      in this session; `rust-ci.yml`'s `replay` job runs it in CI once
+      `ETH_RPC_URL`/`RUN_REPLAY_TESTS` are configured.
 - [ ] **Slice 7 — False-positive validation.** Not started at the
       historical-replay level (same archive-RPC dependency as Slice 6's
       remaining work). Interim signal exists in `detection`'s own unit

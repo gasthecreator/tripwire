@@ -6,6 +6,7 @@ members = [
     "crates/detection",
     "crates/guardian-client",
     "crates/tripwire-daemon",
+    "crates/replay-harness",
 ]
 
 [workspace.package]
@@ -20,7 +21,7 @@ chain-adapter = { path = "crates/chain-adapter" }
 detection = { path = "crates/detection" }
 guardian-client = { path = "crates/guardian-client" }
 
-serde = { version = "=1.0.219", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 thiserror = "1"
