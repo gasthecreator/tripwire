@@ -159,6 +159,7 @@ async fn guardian_client_pauses_a_real_deployed_vault_end_to_end() {
         confidence: Confidence::new(95.0),
         threshold: Confidence::new(80.0),
         matches: vec![],
+        counted_evidence: vec![],
         evaluated_at_unix: 0,
     };
 

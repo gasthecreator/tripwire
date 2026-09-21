@@ -24,6 +24,42 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] Fix evidence double-counting in scoring (found by the Euler replay)
+
+**Author:** Claude Code
+
+**What:** `detection::score` summed every matched condition across every
+signature. The three shipped signatures each contain an outflow
+(`fund_flow_delta`) condition, so a single large outflow scored 60 + 40 +
+30 = 130 -> clamped to 100 and paused on its own; any legitimate
+withdrawal above ~20% of a balance would have paused a protocol. Fix:
+`ConditionKind::evidence_key` names the underlying fact (thresholds
+excluded; call sequences keyed by normalised selectors); each signature
+keeps its distinct evidence (highest weight per fact), and the decision
+sums distinct evidence across all signatures, recording `counted_evidence`
+(key, weight, source signature/condition) so a pause or near miss is
+diagnosable. Hand-built matches without evidence still score (as one fact
+each) rather than silently scoring zero.
+
+**Why:** Corroboration means different facts, not one fact repeated. This
+is a core promise (ARCHITECTURE.md §3.3, SECURITY.md T2) that the tests
+did not actually check against the shipped signature set.
+
+**Verified:** 9 new engine unit tests, 3 core tests, and
+`crates/detection/tests/shipped_signatures.rs` against the real YAML —
+the whale-withdrawal test was run against the pre-fix engine in a
+throwaway worktree and fails there ("25% outflow alone scored 100 and
+would pause"). Live: generic set on Euler 100.0 -> 60.0 (asserted);
+incident-tuned Euler (95.0) and Beanstalk (95.0, generic 65.0) unchanged.
+
+**Process note:** the first commit of this fix went out with the README
+and WORKLOG edits silently skipped (a doc-patch script failed on an
+assertion but the shell carried on to commit). Caught by re-reading the
+diff; fixed in a follow-up commit. Lesson: don't chain `git commit` after
+an unchecked script.
+
+---
+
 ## [2026-09-21] Second real exploit: Euler Finance (found on-chain), and a scoring flaw it exposed
 
 **Author:** Claude Code

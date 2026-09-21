@@ -132,14 +132,18 @@ before merge, docs updated in the same PR as the code they describe.
       two signature-diversity slots (oracle manipulation — candidate
       Cream Finance Oct 2021; reentrancy — candidate dForce Apr 2020 or
       Fei/Rari Apr 2022) are still explicitly-skipped placeholder tests
-      rather than filled with unverified hashes. **Known scoring flaw
-      found on Euler:** the shipped generic signatures score 100.0 on
-      it, but only because a single fact (the large outflow) satisfied a
-      condition in three different signatures and was summed three
-      times — so any legitimate withdrawal above ~20% of a balance would
-      also reach the pause threshold, contradicting the corroboration
-      principle in ARCHITECTURE.md §3.3 / SECURITY.md T2. Tracked as the
-      next fix (deduplicate evidence across signatures). **Cross-language detection wiring is now done for
+      rather than filled with unverified hashes. **Scoring flaw found on Euler, now fixed:** the shipped generic
+      signatures scored 100.0 on it, but only because a single fact (the
+      large outflow) satisfied a condition in three different signatures
+      and was summed three times — so any legitimate withdrawal above
+      ~20% of a balance would also have reached the pause threshold,
+      contradicting ARCHITECTURE.md §3.3 / SECURITY.md T2. Confidence now
+      sums *distinct evidence* (each fact once, at its highest weight),
+      with the counted evidence recorded on the decision; the generic set
+      now scores 60.0 on Euler (below threshold, as it should absent
+      corroboration) and a regression test against the shipped YAML
+      proves a lone outflow of 10-100% never pauses (verified to fail on
+      the pre-fix engine). **Cross-language detection wiring is now done for
       this one case:** `crates/replay-harness/tests/beanstalk_governance_exploit.rs`
       fetches the real transaction's actual decoded call trace (via
       `chain-adapter`, from a real archive RPC) and runs it through the

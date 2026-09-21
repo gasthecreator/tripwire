@@ -78,8 +78,13 @@ withdrawal timed to mimic a fund-flow-anomaly signature) specifically to
 trigger an unwanted pause — a DoS against the protocol, potentially timed
 to block a competitor's liquidation, arbitrage, or redemption.
 **Mitigation:** confidence scoring requires multiple corroborating
-signals above a per-protocol threshold (§3.3), not a single strong
-signal — raising the cost of crafting a convincing false positive.
+*distinct facts* above a per-protocol threshold (§3.3), not a single
+strong signal — raising the cost of crafting a convincing false
+positive. "Distinct" is enforced: the same fact reported by several
+signatures or thresholds is counted once (`evidence_key`), and this is
+regression-tested against the shipped signature set — a scoring bug
+once let one large outflow count three times, which would have made a
+lone legitimate withdrawal pause a protocol.
 Every triggering decision logs which signatures fired and their
 individual weights, so a triggered pause is auditable and a pattern of
 attempted griefing is detectable across incidents, not just per-incident.

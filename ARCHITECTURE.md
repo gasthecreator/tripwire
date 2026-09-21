@@ -182,6 +182,26 @@ signatures fired and their individual scores, must be logged and
 auditable after the fact so a false positive can be diagnosed, not just
 reversed.
 
+**What "multiple corroborating signals" means precisely — evidence, not
+conditions.** Confidence is the sum over *distinct pieces of evidence*,
+each fact counted once at the highest weight any matched condition gave
+it (`ConditionKind::evidence_key`, `detection::score`). Two conditions
+that restate the same observation — a 5% and a 50% outflow tier, or an
+outflow condition that happens to appear in three different signatures —
+are one fact, not three. This was learned the hard way: an earlier
+version summed every matched condition, and scoring the real Euler
+exploit showed the three shipped signatures each contained an outflow
+condition, so one large outflow scored 60 + 40 + 30 and would have paused
+any protocol on a legitimate withdrawal above ~20% of a balance. The
+rule now enforced (and tested against the shipped YAML, not fixtures):
+*no single fact, however large, can reach a pause threshold by itself*
+unless a signature author deliberately weights that one fact above the
+threshold. Facts are keyed by kind (outflow, oracle deviation,
+reentrancy, governance voting power) or, for call patterns, by the exact
+selector sequence. The decision records the counted evidence and which
+signature/condition supplied each weight, so a pause or near miss is
+diagnosable.
+
 ### 3.4 Guardian Contract
 
 `Guardian.sol` holds `PAUSER_ROLE` (OpenZeppelin `AccessControl`) granted
