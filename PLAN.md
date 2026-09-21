@@ -106,7 +106,7 @@ before merge, docs updated in the same PR as the code they describe.
       `guardian_client::connect` + `submit_pause` — then confirms a
       non-pauser key using the same code path fails on-chain.
 - [ ] **Slice 6 — Historical exploit replay harness.** Foundry fork tests
-      against real mainnet history. **Status: one of four done.**
+      against real mainnet history. **Status: two of four done.**
       Beanstalk Farms (Apr 17, 2022) is verified — tx
       `0xcd314668aaa9bbfebaf1a0bd2b6553d01dd58899c508d4729fa7311dc5d33ad7`,
       block 14602790, confirmed directly against Etherscan on
@@ -120,16 +120,26 @@ before merge, docs updated in the same PR as the code they describe.
       the Beanstalk diamond (4 observed), not merely a non-revert. An
       earlier `vm.rpc`-based version of this test could never have
       worked (wrong return format, and no handling of a null `to`); it
-      only looked fine because it had never run against a real RPC. The other three signature-
-      diversity slots (flash-loan/fund-flow — candidate Euler Finance
-      Mar 2023; oracle manipulation — candidate Cream Finance Oct 2021
-      or Mango Markets Oct 2022; reentrancy — candidate dForce Feb 2020
-      or a Curve LP incident Jul 2023) are stubbed as explicitly-skipped
-      placeholder tests rather than filled with unverified hashes — web
-      searches during this session confirmed dates and mechanisms for
-      Euler and Cream but not a specific first-attack transaction hash
-      with enough confidence to assert as fact in a security product's
-      own test suite. **Cross-language detection wiring is now done for
+      only looked fine because it had never run against a real RPC. **Second case verified 2026-09-21: Euler Finance
+      (Mar 13, 2023)** — tx `0xc310a0af…b111d`, block 16817996, found
+      on-chain (Aave V2 `FlashLoan` event for exactly 30,000,000 DAI)
+      rather than from a web summary, then confirmed on Etherscan (sender
+      "Euler Finance Exploiter 3", recipient "Euler Exploit Contract 1").
+      Solidity replay asserts Euler's DAI balance 8,904,507 -> 0; Rust
+      replay (`tests/euler_flash_loan_drain.rs`, real 151-frame trace,
+      real fund-flow `Baseline` from archive balance + receipt logs)
+      scores an incident-tuned signature at 95.0 vs 80.0. The remaining
+      two signature-diversity slots (oracle manipulation — candidate
+      Cream Finance Oct 2021; reentrancy — candidate dForce Apr 2020 or
+      Fei/Rari Apr 2022) are still explicitly-skipped placeholder tests
+      rather than filled with unverified hashes. **Known scoring flaw
+      found on Euler:** the shipped generic signatures score 100.0 on
+      it, but only because a single fact (the large outflow) satisfied a
+      condition in three different signatures and was summed three
+      times — so any legitimate withdrawal above ~20% of a balance would
+      also reach the pause threshold, contradicting the corroboration
+      principle in ARCHITECTURE.md §3.3 / SECURITY.md T2. Tracked as the
+      next fix (deduplicate evidence across signatures). **Cross-language detection wiring is now done for
       this one case:** `crates/replay-harness/tests/beanstalk_governance_exploit.rs`
       fetches the real transaction's actual decoded call trace (via
       `chain-adapter`, from a real archive RPC) and runs it through the
@@ -193,9 +203,8 @@ before merge, docs updated in the same PR as the code they describe.
   Infura/QuickNode) — not something this session could do on his
   behalf. Blocks completing Slice 6/7 and running `foundry-ci.yml`'s
   replay job in CI. Everything else is unblocked and already green.
-- **Confirm the remaining three historical exploits' exact transaction
-  hashes** (Euler Finance, an oracle-manipulation case, a reentrancy
-  case) against Etherscan directly before writing their replay tests —
+- **Confirm the remaining two historical exploits' exact transaction
+  hashes** (an oracle-manipulation case, a reentrancy case) against Etherscan directly before writing their replay tests —
   do not reuse a web-search-summarized hash without independently
   fetching and confirming it against the block explorer itself; this
   session caught one real instance of a search-summary tool inventing a
