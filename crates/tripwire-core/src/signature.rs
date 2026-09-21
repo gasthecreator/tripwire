@@ -70,6 +70,39 @@ pub enum ConditionKind {
     GovernanceProposalAnomaly { threshold_pct: f64 },
 }
 
+impl ConditionKind {
+    /// Names the underlying *fact* this condition is evidence of, so the
+    /// scorer can count each fact once no matter how many conditions (in
+    /// how many signatures, at what thresholds) it satisfies.
+    ///
+    /// Without this, one large outflow that satisfied a `FundFlowDelta`
+    /// condition in three different signatures was summed three times and
+    /// reached the pause threshold on its own, defeating the rule that no
+    /// single signal may trigger a pause (ARCHITECTURE.md §3.3,
+    /// SECURITY.md T2). Found by scoring the real Euler exploit.
+    ///
+    /// The threshold is deliberately not part of the key: a 5% and a 50%
+    /// outflow condition are the same observation. `CallSequence` is keyed
+    /// by its (case-normalised) selector list, so distinct call patterns
+    /// remain distinct evidence.
+    pub fn evidence_key(&self) -> String {
+        match self {
+            ConditionKind::FundFlowDelta { .. } => "fund_flow".into(),
+            ConditionKind::CallSequence { selectors } => format!(
+                "call_sequence:{}",
+                selectors
+                    .iter()
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            ConditionKind::OraclePriceDeviation { .. } => "oracle_price_deviation".into(),
+            ConditionKind::ReentrancyDepth { .. } => "reentrancy".into(),
+            ConditionKind::GovernanceProposalAnomaly { .. } => "governance_voting_power".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +186,56 @@ conditions:
                 selectors: vec!["0xa9059cbb".into(), "0x23b872dd".into()]
             }
         );
+    }
+
+    #[test]
+    fn evidence_key_ignores_thresholds() {
+        let a = ConditionKind::FundFlowDelta { threshold_pct: 5.0 };
+        let b = ConditionKind::FundFlowDelta {
+            threshold_pct: 50.0,
+        };
+        assert_eq!(a.evidence_key(), b.evidence_key());
+        assert_eq!(
+            ConditionKind::ReentrancyDepth { min_depth_delta: 1 }.evidence_key(),
+            ConditionKind::ReentrancyDepth { min_depth_delta: 3 }.evidence_key()
+        );
+    }
+
+    #[test]
+    fn evidence_keys_differ_across_kinds() {
+        let keys = [
+            ConditionKind::FundFlowDelta { threshold_pct: 1.0 }.evidence_key(),
+            ConditionKind::OraclePriceDeviation { threshold_pct: 1.0 }.evidence_key(),
+            ConditionKind::ReentrancyDepth { min_depth_delta: 1 }.evidence_key(),
+            ConditionKind::GovernanceProposalAnomaly { threshold_pct: 1.0 }.evidence_key(),
+            ConditionKind::CallSequence {
+                selectors: vec!["0xaa".into()],
+            }
+            .evidence_key(),
+        ];
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len());
+    }
+
+    #[test]
+    fn call_sequence_evidence_is_keyed_by_normalised_selectors() {
+        let lower = ConditionKind::CallSequence {
+            selectors: vec!["0xabcdef12".into()],
+        };
+        let upper = ConditionKind::CallSequence {
+            selectors: vec!["0xABCDEF12".into()],
+        };
+        let other = ConditionKind::CallSequence {
+            selectors: vec!["0x11111111".into()],
+        };
+        let ordered = ConditionKind::CallSequence {
+            selectors: vec!["0xaa".into(), "0xbb".into()],
+        };
+        let reversed = ConditionKind::CallSequence {
+            selectors: vec!["0xbb".into(), "0xaa".into()],
+        };
+        assert_eq!(lower.evidence_key(), upper.evidence_key());
+        assert_ne!(lower.evidence_key(), other.evidence_key());
+        assert_ne!(ordered.evidence_key(), reversed.evidence_key());
     }
 }

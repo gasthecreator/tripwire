@@ -173,6 +173,7 @@ mod tests {
             confidence: Confidence::new(confidence),
             threshold: Confidence::new(threshold),
             matches: vec![],
+            counted_evidence: vec![],
             evaluated_at_unix: 0,
         }
     }

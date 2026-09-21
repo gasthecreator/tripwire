@@ -5,6 +5,17 @@ Each `*.yaml` file here is one behavioral exploit signature, loaded by
 §3.3 for the schema's design reasoning and `crates/tripwire-core/src/signature.rs`
 for the authoritative schema (`Signature`/`Condition`/`ConditionKind`).
 
+**How weights combine (read before writing a signature):** confidence is
+the sum over *distinct evidence*, each fact counted once at the highest
+weight any matched condition gives it — not the sum of all matched
+conditions. Conditions of the same kind observe the same fact
+(`fund_flow_delta` at 5% and at 50% is one fact; an outflow condition in
+three signatures is one fact), while `call_sequence` conditions are
+distinct facts per selector sequence. So a single condition alone should
+never carry a weight at or above your pause threshold unless you mean a
+lone observation to pause; corroboration comes from *different* kinds of
+evidence. The decision's `counted_evidence` shows exactly what counted.
+
 Adding a new signature is adding a new file here — it never requires a
 Rust code change unless the signature needs a genuinely new
 `ConditionKind` the engine doesn't evaluate yet (in which case: add the

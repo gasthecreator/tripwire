@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use tripwire_core::{
-    Address, ChainId, Confidence, PauseDecision, Signature, SignatureMatch, TxEvent,
+    Address, ChainId, Confidence, CountedEvidence, EvidenceHit, PauseDecision, Signature,
+    SignatureMatch, TxEvent,
 };
 
 use crate::conditions::{self, Baseline};
@@ -26,12 +29,26 @@ fn evaluate_one_signature(
     baseline: &Baseline,
 ) -> Option<SignatureMatch> {
     let mut matched_ids = Vec::new();
-    let mut weight_sum = 0.0_f64;
+    // Distinct evidence within this signature: several conditions can
+    // observe the same fact at different thresholds (e.g. a 5% and a 50%
+    // outflow tier); that fact counts once, at the highest weight.
+    let mut best: HashMap<String, EvidenceHit> = HashMap::new();
 
     for condition in &sig.conditions {
         if conditions::evaluate(&condition.kind, tx, baseline) {
             matched_ids.push(condition.id.clone());
-            weight_sum += condition.weight;
+            let key = condition.kind.evidence_key();
+            let hit = EvidenceHit {
+                key: key.clone(),
+                condition_id: condition.id.clone(),
+                weight: condition.weight,
+            };
+            match best.get(&key) {
+                Some(existing) if existing.weight >= hit.weight => {}
+                _ => {
+                    best.insert(key, hit);
+                }
+            }
         }
     }
 
@@ -39,21 +56,40 @@ fn evaluate_one_signature(
         return None;
     }
 
+    let evidence = sorted_evidence(best.into_values().collect());
+    let standalone: Confidence = evidence.iter().map(|h| Confidence::new(h.weight)).sum();
     Some(SignatureMatch {
         signature_id: sig.id.clone(),
-        weight_contributed: Confidence::new(weight_sum),
+        weight_contributed: standalone,
         matched_condition_ids: matched_ids,
+        evidence,
     })
 }
 
-/// Combines every signature's contribution into one overall confidence
-/// and produces the auditable `PauseDecision` record. Matches are
-/// *summed*, not maxed: corroboration across multiple different
-/// signatures firing on the same incident should raise confidence
-/// further, not be discarded in favor of only the single strongest match
-/// (ARCHITECTURE.md §3.3) — this is what lets, e.g., a moderate
-/// fund-flow anomaly plus a moderate reentrancy signal jointly cross a
-/// threshold that neither would alone.
+/// Deterministic order (heaviest first, then key) so decisions and their
+/// audit records are reproducible.
+fn sorted_evidence(mut hits: Vec<EvidenceHit>) -> Vec<EvidenceHit> {
+    hits.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    hits
+}
+
+/// Combines every signature's evidence into one overall confidence and
+/// produces the auditable `PauseDecision` record.
+///
+/// Confidence is the sum over *distinct evidence*, each fact counted once
+/// at the highest weight any matched condition gave it — not the sum of
+/// every matched condition. Corroboration across genuinely different
+/// facts (a call pattern plus a balance drain) raises confidence;
+/// restating one fact in several signatures does not
+/// (ARCHITECTURE.md §3.3). Before this, a single large outflow satisfying
+/// a condition in three shipped signatures scored 60 + 40 + 30 and paused
+/// on its own, so any legitimate withdrawal above ~20% of a balance would
+/// have paused a protocol.
 pub fn score(
     chain: ChainId,
     target_contract: Address,
@@ -62,7 +98,49 @@ pub fn score(
     threshold: Confidence,
     now_unix: u64,
 ) -> PauseDecision {
-    let confidence: Confidence = matches.iter().map(|m| m.weight_contributed).sum();
+    let mut best: HashMap<String, CountedEvidence> = HashMap::new();
+    for m in &matches {
+        // A match assembled by hand without per-fact evidence still counts,
+        // as a single fact of its own, rather than silently scoring zero.
+        let fallback;
+        let hits: &[EvidenceHit] = if m.evidence.is_empty() && m.weight_contributed.value() > 0.0 {
+            fallback = [EvidenceHit {
+                key: format!("signature:{}", m.signature_id),
+                condition_id: String::new(),
+                weight: m.weight_contributed.value(),
+            }];
+            &fallback
+        } else {
+            &m.evidence
+        };
+        for h in hits {
+            let candidate = CountedEvidence {
+                key: h.key.clone(),
+                weight: h.weight,
+                signature_id: m.signature_id.clone(),
+                condition_id: h.condition_id.clone(),
+            };
+            match best.get(&h.key) {
+                Some(existing) if existing.weight >= candidate.weight => {}
+                _ => {
+                    best.insert(h.key.clone(), candidate);
+                }
+            }
+        }
+    }
+
+    let mut counted_evidence: Vec<CountedEvidence> = best.into_values().collect();
+    counted_evidence.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    let confidence: Confidence = counted_evidence
+        .iter()
+        .map(|e| Confidence::new(e.weight))
+        .sum();
+
     PauseDecision {
         chain,
         target_contract,
@@ -70,6 +148,7 @@ pub fn score(
         confidence,
         threshold,
         matches,
+        counted_evidence,
         evaluated_at_unix: now_unix,
     }
 }
@@ -303,5 +382,225 @@ mod tests {
             1000,
         );
         assert_eq!(decision.triggering_tx_hash, "0xexploit");
+    }
+
+    // --- evidence deduplication (found via the real Euler exploit) ---
+
+    fn fund_flow_sig(id: &str, threshold_pct: f64, weight: f64) -> Signature {
+        Signature {
+            id: id.into(),
+            description: "test".into(),
+            category: SignatureCategory::FundFlowAnomaly,
+            window_seconds: 10,
+            conditions: vec![Condition {
+                id: format!("{id}-outflow"),
+                kind: ConditionKind::FundFlowDelta { threshold_pct },
+                weight,
+            }],
+        }
+    }
+
+    fn twenty_five_percent_outflow() -> Baseline {
+        Baseline {
+            balance_baseline_wei: 1_000,
+            outflow_wei: 250,
+            ..Default::default()
+        }
+    }
+
+    fn eval(sigs: &[Signature], tx: &TxEvent, baseline: &Baseline) -> PauseDecision {
+        evaluate(
+            sigs,
+            ChainId::ETHEREUM_MAINNET,
+            Address::from_str(VAULT).unwrap(),
+            tx,
+            baseline,
+            Confidence::new(80.0),
+            1000,
+        )
+    }
+
+    #[test]
+    fn one_fact_satisfying_three_signatures_is_counted_once_at_its_highest_weight() {
+        // The Euler bug: a single outflow satisfied a condition in three
+        // signatures (60 + 40 + 30) and scored 130 -> paused on its own.
+        let sigs = vec![
+            fund_flow_sig("a", 20.0, 60.0),
+            fund_flow_sig("b", 15.0, 40.0),
+            fund_flow_sig("c", 5.0, 30.0),
+        ];
+        let d = eval(&sigs, &benign_tx(), &twenty_five_percent_outflow());
+        assert_eq!(
+            d.matches.len(),
+            3,
+            "all three signatures still match (audit)"
+        );
+        assert_eq!(d.confidence.value(), 60.0);
+        assert!(!d.should_pause());
+        assert_eq!(d.counted_evidence.len(), 1);
+        assert_eq!(d.counted_evidence[0].key, "fund_flow");
+        assert_eq!(d.counted_evidence[0].signature_id, "a");
+    }
+
+    #[test]
+    fn different_facts_still_add_up() {
+        let sigs = vec![
+            reentrancy_signature(45.0),
+            fund_flow_sig("drain", 10.0, 45.0),
+        ];
+        let d = eval(&sigs, &tx_with_reentrancy(), &twenty_five_percent_outflow());
+        assert_eq!(d.confidence.value(), 90.0);
+        assert!(d.should_pause());
+        assert_eq!(d.counted_evidence.len(), 2);
+    }
+
+    #[test]
+    fn tiered_thresholds_within_one_signature_count_once() {
+        let sig = Signature {
+            id: "tiered".into(),
+            description: "test".into(),
+            category: SignatureCategory::FundFlowAnomaly,
+            window_seconds: 10,
+            conditions: vec![
+                Condition {
+                    id: "small".into(),
+                    kind: ConditionKind::FundFlowDelta { threshold_pct: 5.0 },
+                    weight: 20.0,
+                },
+                Condition {
+                    id: "large".into(),
+                    kind: ConditionKind::FundFlowDelta {
+                        threshold_pct: 20.0,
+                    },
+                    weight: 50.0,
+                },
+            ],
+        };
+        let d = eval(&[sig], &benign_tx(), &twenty_five_percent_outflow());
+        assert_eq!(d.confidence.value(), 50.0);
+        assert_eq!(d.matches[0].matched_condition_ids, vec!["small", "large"]);
+        assert_eq!(d.matches[0].weight_contributed.value(), 50.0);
+        assert_eq!(d.counted_evidence[0].condition_id, "large");
+    }
+
+    #[test]
+    fn only_conditions_that_actually_matched_count() {
+        // 25% outflow satisfies the 20% tier but not the 30% tier.
+        let sig = Signature {
+            id: "tiered".into(),
+            description: "test".into(),
+            category: SignatureCategory::FundFlowAnomaly,
+            window_seconds: 10,
+            conditions: vec![
+                Condition {
+                    id: "mid".into(),
+                    kind: ConditionKind::FundFlowDelta {
+                        threshold_pct: 20.0,
+                    },
+                    weight: 30.0,
+                },
+                Condition {
+                    id: "huge".into(),
+                    kind: ConditionKind::FundFlowDelta {
+                        threshold_pct: 30.0,
+                    },
+                    weight: 90.0,
+                },
+            ],
+        };
+        let d = eval(&[sig], &benign_tx(), &twenty_five_percent_outflow());
+        assert_eq!(d.confidence.value(), 30.0);
+    }
+
+    fn selector_sig(id: &str, selector: &str, weight: f64) -> Signature {
+        Signature {
+            id: id.into(),
+            description: "test".into(),
+            category: SignatureCategory::FlashLoanDrain,
+            window_seconds: 10,
+            conditions: vec![Condition {
+                id: format!("{id}-seq"),
+                kind: ConditionKind::CallSequence {
+                    selectors: vec![selector.into()],
+                },
+                weight,
+            }],
+        }
+    }
+
+    #[test]
+    fn identical_call_patterns_in_two_signatures_count_once_distinct_ones_both() {
+        let mut tx = benign_tx();
+        tx.call_frames[0].selector = Some("0xdeposit".into());
+        // same selector, different letter case, in two signatures
+        let same = vec![
+            selector_sig("x", "0xdeposit", 40.0),
+            selector_sig("y", "0xDEPOSIT", 35.0),
+        ];
+        assert_eq!(
+            eval(&same, &tx, &Baseline::default()).confidence.value(),
+            40.0
+        );
+        // a genuinely different call pattern is different evidence
+        tx.call_frames.push(CallFrame {
+            depth: 0,
+            from: Address::ZERO,
+            to: Address::from_str(VAULT).unwrap(),
+            selector: Some("0xother".into()),
+            value_wei: 0,
+            kind: CallKind::Call,
+        });
+        let distinct = vec![
+            selector_sig("x", "0xdeposit", 40.0),
+            selector_sig("y", "0xother", 35.0),
+        ];
+        assert_eq!(
+            eval(&distinct, &tx, &Baseline::default())
+                .confidence
+                .value(),
+            75.0
+        );
+    }
+
+    #[test]
+    fn counted_evidence_is_ordered_heaviest_first_for_reproducible_audit() {
+        let sigs = vec![
+            reentrancy_signature(30.0),
+            fund_flow_sig("drain", 10.0, 55.0),
+        ];
+        let d = eval(&sigs, &tx_with_reentrancy(), &twenty_five_percent_outflow());
+        let keys: Vec<_> = d.counted_evidence.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["fund_flow", "reentrancy"]);
+    }
+
+    #[test]
+    fn hand_built_matches_without_evidence_still_score() {
+        let tx = benign_tx();
+        let matches = vec![SignatureMatch {
+            signature_id: "legacy".into(),
+            weight_contributed: Confidence::new(70.0),
+            matched_condition_ids: vec![],
+            evidence: vec![],
+        }];
+        let d = score(
+            ChainId::ETHEREUM_MAINNET,
+            Address::from_str(VAULT).unwrap(),
+            &tx,
+            matches,
+            Confidence::new(80.0),
+            0,
+        );
+        assert_eq!(d.confidence.value(), 70.0);
+    }
+
+    #[test]
+    fn evidence_scoring_never_exceeds_the_bound() {
+        let sigs = vec![
+            reentrancy_signature(70.0),
+            fund_flow_sig("drain", 10.0, 70.0),
+            selector_sig("seq", "0xwithdraw", 70.0),
+        ];
+        let d = eval(&sigs, &tx_with_reentrancy(), &twenty_five_percent_outflow());
+        assert_eq!(d.confidence.value(), 100.0);
     }
 }

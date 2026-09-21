@@ -13,7 +13,7 @@ mod signature;
 
 pub use address::{Address, AddressParseError};
 pub use chain::ChainId;
-pub use confidence::{Confidence, SignatureMatch};
-pub use decision::PauseDecision;
+pub use confidence::{Confidence, EvidenceHit, SignatureMatch};
+pub use decision::{CountedEvidence, PauseDecision};
 pub use event::{CallFrame, CallKind, LogEvent, TxEvent};
 pub use signature::{Condition, ConditionKind, Signature, SignatureCategory};

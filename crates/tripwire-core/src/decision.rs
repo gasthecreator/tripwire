@@ -16,7 +16,23 @@ pub struct PauseDecision {
     pub confidence: Confidence,
     pub threshold: Confidence,
     pub matches: Vec<SignatureMatch>,
+    /// The distinct pieces of evidence that produced `confidence`, each
+    /// counted once at its highest weight across all signatures. This is
+    /// the record that makes a pause (or a near miss) diagnosable: it
+    /// says exactly what was believed and which signature/condition it
+    /// came from.
+    #[serde(default)]
+    pub counted_evidence: Vec<CountedEvidence>,
     pub evaluated_at_unix: u64,
+}
+
+/// A fact that counted toward a decision's confidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CountedEvidence {
+    pub key: String,
+    pub weight: f64,
+    pub signature_id: String,
+    pub condition_id: String,
 }
 
 impl PauseDecision {
@@ -39,6 +55,7 @@ mod tests {
             confidence: Confidence::new(confidence),
             threshold: Confidence::new(threshold),
             matches: vec![],
+            counted_evidence: vec![],
             evaluated_at_unix: 0,
         }
     }
@@ -70,6 +87,7 @@ mod tests {
             signature_id: "reentrancy-basic".into(),
             weight_contributed: Confidence::new(90.0),
             matched_condition_ids: vec!["reenter".into()],
+            evidence: vec![],
         });
         let json = serde_json::to_string(&d).unwrap();
         let back: PauseDecision = serde_json::from_str(&json).unwrap();

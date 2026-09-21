@@ -53,8 +53,27 @@ impl std::iter::Sum for Confidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignatureMatch {
     pub signature_id: String,
+    /// This signature's standalone score: the sum of its distinct
+    /// evidence (see `evidence`). Not what decides a pause — the
+    /// decision's confidence deduplicates evidence *across* signatures.
     pub weight_contributed: Confidence,
+    /// Every condition that matched, including ones whose evidence was
+    /// already counted (audit trail).
     pub matched_condition_ids: Vec<String>,
+    /// The signature's distinct pieces of evidence, each at the highest
+    /// weight among the conditions that matched it.
+    #[serde(default)]
+    pub evidence: Vec<EvidenceHit>,
+}
+
+/// One observed fact and the weight a condition assigns it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceHit {
+    /// `ConditionKind::evidence_key` of the condition that matched.
+    pub key: String,
+    /// The condition that supplied this (highest) weight.
+    pub condition_id: String,
+    pub weight: f64,
 }
 
 #[cfg(test)]

@@ -136,12 +136,16 @@ async fn euler_exploit_scores_above_pause_threshold() {
     );
     assert!(decision.should_pause());
 
-    // Shipped generic signatures on the same real data. Printed, not
-    // asserted: today they score 100.0 here, but only because the single
-    // large-outflow fact satisfies a condition in three different
-    // signatures and is summed three times (see PLAN.md). Asserting that
-    // number would enshrine the flaw; the fix PR turns this into an
-    // assertion of the corrected behaviour.
+    // Shipped generic signatures on the same real data. Their placeholder
+    // flash-loan and governance selectors don't match Euler, so the only
+    // evidence they see is the balance drain, which three signatures each
+    // report. Deduplicated, that is one fact worth at most 60 — below the
+    // pause threshold: the generic set alone does NOT catch Euler, and,
+    // crucially, would not pause on any lone large outflow either. (Before
+    // evidence deduplication this scored 100.0 by summing the same outflow
+    // three times; see WORKLOG.md.) Catching Euler with generic signatures
+    // needs per-protocol tuning or a corroborating condition, as with
+    // Beanstalk.
     let generic = detection::load_signatures_from_dir(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../signatures"),
     )
@@ -156,15 +160,16 @@ async fn euler_exploit_scores_above_pause_threshold() {
         tx.timestamp_unix,
     );
     println!(
-        "Shipped generic signatures on the same real data: confidence {:.1}, matched {:?}",
+        "Shipped generic signatures on the same real data: confidence {:.1}, counted evidence {:?}",
         g.confidence.value(),
-        g.matches
-            .iter()
-            .map(|m| (
-                &m.signature_id,
-                &m.matched_condition_ids,
-                m.weight_contributed.value()
-            ))
-            .collect::<Vec<_>>()
+        g.counted_evidence
     );
+    assert!(
+        g.matches.len() >= 2,
+        "several generic signatures see the drain"
+    );
+    assert_eq!(g.counted_evidence.len(), 1, "but it is one fact");
+    assert_eq!(g.counted_evidence[0].key, "fund_flow");
+    assert_eq!(g.confidence.value(), 60.0);
+    assert!(!g.should_pause());
 }
