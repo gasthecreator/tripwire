@@ -86,9 +86,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Fetches the real Beanstalk exploit transaction (block 14602790)
-      # from a real archive RPC and scores its actual decoded call trace
-      # through the real detection engine -- see
+      # `cast run` (Foundry) re-executes the real transaction locally to
+      # produce its call trace, so this works on free-tier RPC plans that
+      # gate debug_traceTransaction.
+      - uses: foundry-rs/foundry-toolchain@v1
+      # Replays the real Beanstalk exploit transaction (block 14602790)
+      # from a real archive RPC and scores its actual call trace through
+      # the real detection engine -- see
       # crates/replay-harness/tests/beanstalk_governance_exploit.rs.
       - name: cargo test -p replay-harness
         env:

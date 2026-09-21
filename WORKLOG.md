@@ -24,6 +24,32 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] Score a real exploit trace live via `cast run` (no paid trace API)
+
+**Author:** Claude Code
+
+**What:** Free-tier RPC blocks trace methods, but `cast run <tx> --json`
+re-executes a transaction locally at its true block position using only
+state-read calls. Added `replay_harness::cast_trace` (JSON → `CallFrame`s,
+walking `children` from the single root; CREATE frames get no selector;
+6 unit tests) and switched the Beanstalk test to it. Live result: 349
+frames, depth 16, incident-tuned signature scores 95.0 vs 80.0. Also
+scored the shipped generic signatures on the same trace: 65.0
+(`reentrancy-basic` only), below threshold — but that match is a
+false-positive pattern: the condition counted 36 recurring (target,
+selector) pairs, mostly read-only STATICCALLs (`balanceOf`,
+`totalSupply`), because `CallFrame` records no call kind.
+
+**Why:** The incident-tuned signature was built from selectors known to
+be in the exploit, so passing it proves plumbing, not detection. Scoring
+the generic set alongside keeps that distinction honest, and it surfaced
+a real weakness no synthetic test had.
+
+**Verified:** Live against the free-tier archive RPC (test passes,
+~60s); no-key skip path; fmt, clippy `-D warnings`, 84 Rust tests green.
+
+---
+
 ## [2026-09-21] First live RPC run: fix the Beanstalk fork test, learn the free-tier limit
 
 **Author:** Claude Code
