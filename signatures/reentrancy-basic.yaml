@@ -4,10 +4,13 @@
 # Historical precedent: The DAO (2016), dForce (Feb 2020).
 id: reentrancy-basic
 description: >
-  Same (target, function-selector) pair is called again at a deeper point
-  in the same transaction's call trace than its first occurrence, paired
-  with a real fund outflow so a harmless recursive read doesn't also
-  trigger this.
+  A state-changing call to a (target, function-selector) pair is made
+  while an earlier call to that same pair is still active on the call
+  stack (a true re-entry, not a repeat after the first call returned, and
+  not a read-only STATICCALL), paired with a real fund outflow. Nested
+  callbacks are also used legitimately (chained flash swaps re-enter
+  uniswapV2Call), which is why the re-entry alone is deliberately below a
+  typical pause threshold and the outflow corroboration is required.
 category: reentrancy
 window_seconds: 5
 conditions:

@@ -24,6 +24,39 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] Fix the reentrancy false positive found on the real Beanstalk trace
+
+**Author:** Claude Code
+
+**What:** The generic `reentrancy-basic` condition matched the real
+Beanstalk trace 36 times though it contains no classic reentrancy. Two
+flaws: (1) `CallFrame` had no call kind, so read-only STATICCALLs
+(`balanceOf`, `totalSupply`) counted as re-entry; (2) the "earlier call"
+only had to appear earlier in the trace, not still be on the call stack,
+so a call that had already returned counted as re-entered. Fix: added
+`CallKind` (Call/StaticCall/DelegateCall/CallCode/Create; unknown maps to
+Call, conservatively state-changing) to `CallFrame`, populated by both
+trace sources (chain-adapter callTracer `type`, `cast run` `kind`; CREATE
+frames no longer get initcode-as-selector); the condition now keeps a
+stack of active ancestors (rebuilt from pre-order frames + depth) and
+flags only a non-static call re-entering a non-static active ancestor
+with the same (target, selector). 8 new detector tests, 4 core, 2
+adapter, 1 cast_trace.
+
+**Why:** Left as-is, this would fire on ordinary busy transactions; a
+pause is a serious action against a live protocol.
+
+**Verified:** Live on the real trace: matches 36 -> 1. The one remaining
+match is real, not a bug: `uniswapV2Call` (0x10d1e85c) re-entered at
+depth 8 while its depth-6 invocation on the attacker's contract is
+active (chained flash swaps). It scores 65.0 alone, under the 80.0
+threshold, because the signature needs an outflow to corroborate; the
+live test asserts exactly that shape (and my first version of the
+assertion expected zero matches, which running it live proved wrong).
+Also fmt, clippy `-D warnings`, full test suite green.
+
+---
+
 ## [2026-09-21] Score a real exploit trace live via `cast run` (no paid trace API)
 
 **Author:** Claude Code

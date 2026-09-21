@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use tripwire_core::{Address, ConditionKind, TxEvent};
+use tripwire_core::{CallFrame, ConditionKind, TxEvent};
 
 /// External context a condition evaluator needs beyond what's in a raw
 /// `TxEvent` — a protocol balance baseline, a reference oracle price, a
@@ -92,20 +91,46 @@ fn evaluate_oracle_price_deviation(threshold_pct: f64, baseline: &Baseline) -> b
     }
 }
 
+/// Real reentrancy: a state-changing call to `(target, selector)` is made
+/// while an *earlier, still-active* call to that same `(target,
+/// selector)` is on the call stack at least `min_depth_delta` levels up.
+///
+/// Two properties matter, both found by scoring a real exploit trace (the
+/// Beanstalk transaction) with the previous version of this check, which
+/// flagged 36 "recurrences" in a trace containing no reentrancy:
+///
+/// * The earlier call must be an *ancestor* of the later one, not merely
+///   something that appeared earlier in the trace. A call that already
+///   returned cannot be re-entered. Ancestry is reconstructed from the
+///   pre-order frame list and `depth`: a frame's active ancestors are the
+///   most recent frame at each shallower depth.
+/// * Read-only `STATICCALL` frames are ignored on both sides. They cannot
+///   modify state, so repeated `balanceOf`/`totalSupply` lookups are not
+///   re-entry. Frames without a selector are ignored too: there is no
+///   function identity to compare.
+///
+/// Assumes `tx.call_frames` is in execution (pre-order) order with
+/// accurate depths, which both trace sources guarantee.
 fn evaluate_reentrancy_depth(min_depth_delta: u32, tx: &TxEvent) -> bool {
-    let mut first_seen_depth: HashMap<(Address, Option<String>), u32> = HashMap::new();
+    // Active call stack: one frame per depth level, deepest last.
+    let mut stack: Vec<&CallFrame> = Vec::new();
     for frame in &tx.call_frames {
-        let key = (frame.to, frame.selector.clone());
-        match first_seen_depth.get(&key) {
-            None => {
-                first_seen_depth.insert(key, frame.depth);
-            }
-            Some(&first_depth) => {
-                if frame.depth >= first_depth + min_depth_delta {
-                    return true;
-                }
+        // Leaving deeper subtrees: drop everything at or below this depth.
+        while stack.last().is_some_and(|top| top.depth >= frame.depth) {
+            stack.pop();
+        }
+        if !frame.kind.is_static() && frame.selector.is_some() {
+            let reenters = stack.iter().any(|ancestor| {
+                !ancestor.kind.is_static()
+                    && ancestor.to == frame.to
+                    && ancestor.selector == frame.selector
+                    && frame.depth >= ancestor.depth + min_depth_delta
+            });
+            if reenters {
+                return true;
             }
         }
+        stack.push(frame);
     }
     false
 }
@@ -128,7 +153,7 @@ fn evaluate_governance_anomaly(threshold_pct: f64, baseline: &Baseline) -> bool 
 mod tests {
     use super::*;
     use std::str::FromStr;
-    use tripwire_core::{CallFrame, ChainId};
+    use tripwire_core::{Address, CallKind, ChainId};
 
     fn empty_tx() -> TxEvent {
         TxEvent {
@@ -146,12 +171,17 @@ mod tests {
     }
 
     fn frame(depth: u32, to: &str, selector: Option<&str>) -> CallFrame {
+        frame_k(depth, to, selector, CallKind::Call)
+    }
+
+    fn frame_k(depth: u32, to: &str, selector: Option<&str>, kind: CallKind) -> CallFrame {
         CallFrame {
             depth,
             from: Address::ZERO,
             to: Address::from_str(to).unwrap(),
             selector: selector.map(String::from),
             value_wei: 0,
+            kind,
         }
     }
 
@@ -369,6 +399,113 @@ mod tests {
             ),
         ];
         assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    // --- reentrancy: ancestry and read-only calls ---
+
+    #[test]
+    fn reentrancy_requires_the_earlier_call_to_still_be_active() {
+        // V.withdraw returns inside A's subtree, then V.withdraw runs
+        // again deeper inside B's subtree. The first call had already
+        // finished, so nothing was re-entered. (The previous check keyed
+        // only on "seen earlier at a shallower depth" and fired here.)
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, OTHER, Some("0xroot")),
+            frame(1, OTHER, Some("0xaaaa")),
+            frame(2, VAULT, Some("0xwithdraw")),
+            frame(1, OTHER, Some("0xbbbb")),
+            frame(2, OTHER, Some("0xcccc")),
+            frame(3, VAULT, Some("0xwithdraw")),
+        ];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn reentrancy_fires_when_the_earlier_call_is_an_active_ancestor() {
+        // Same shape, but the second withdraw is nested inside the first.
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, OTHER, Some("0xroot")),
+            frame(1, VAULT, Some("0xwithdraw")),
+            frame(2, OTHER, Some("0xfallback")),
+            frame(3, VAULT, Some("0xwithdraw")),
+        ];
+        assert!(evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn sibling_repeats_at_the_same_depth_are_not_reentrancy() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, OTHER, Some("0xroot")),
+            frame(1, VAULT, Some("0xtransfer")),
+            frame(1, VAULT, Some("0xtransfer")),
+        ];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn repeated_read_only_staticcalls_are_not_reentrancy() {
+        // The shape that produced 36 false matches on the real Beanstalk
+        // trace: the same view function on the same token, nested deeper.
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame_k(0, VAULT, Some("0x70a08231"), CallKind::StaticCall),
+            frame_k(1, VAULT, Some("0x70a08231"), CallKind::StaticCall),
+            frame_k(2, VAULT, Some("0x70a08231"), CallKind::StaticCall),
+        ];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn a_staticcall_cannot_be_the_reentering_call_or_the_reentered_one() {
+        let mut tx = empty_tx();
+        // state-changing ancestor, static re-entry
+        tx.call_frames = vec![
+            frame(0, VAULT, Some("0xwithdraw")),
+            frame_k(1, VAULT, Some("0xwithdraw"), CallKind::StaticCall),
+        ];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+        // static ancestor, state-changing re-entry
+        tx.call_frames = vec![
+            frame_k(0, VAULT, Some("0xwithdraw"), CallKind::StaticCall),
+            frame(1, VAULT, Some("0xwithdraw")),
+        ];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn delegatecall_reentry_into_the_same_target_still_counts() {
+        // Only STATICCALL is exempt: a DELEGATECALL can modify state.
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, VAULT, Some("0xwithdraw")),
+            frame_k(1, VAULT, Some("0xwithdraw"), CallKind::DelegateCall),
+        ];
+        assert!(evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn frames_without_a_selector_are_ignored_by_reentrancy() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![frame(0, VAULT, None), frame(1, VAULT, None)];
+        assert!(!evaluate_reentrancy_depth(1, &tx));
+    }
+
+    #[test]
+    fn deep_reentrancy_two_levels_below_the_original_call_is_found() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, VAULT, Some("0xwithdraw")),
+            frame(1, OTHER, Some("0xhook")),
+            frame(2, VAULT, Some("0xdeposit")),
+            frame(3, OTHER, Some("0xhook")),
+            frame(4, VAULT, Some("0xwithdraw")),
+        ];
+        assert!(evaluate_reentrancy_depth(1, &tx));
+        assert!(evaluate_reentrancy_depth(4, &tx));
+        assert!(!evaluate_reentrancy_depth(5, &tx));
     }
 
     // --- governance anomaly ---

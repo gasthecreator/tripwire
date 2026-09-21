@@ -59,9 +59,10 @@ pub enum ConditionKind {
     /// reference price (a TWAP, or a second independent oracle) by more
     /// than `threshold_pct` within the window.
     OraclePriceDeviation { threshold_pct: f64 },
-    /// Fires if the same `(to, selector)` pair recurs at more than
-    /// `min_depth_delta` deeper call-stack depth than its first
-    /// occurrence within one transaction's call frames.
+    /// Fires if a state-changing call to a `(to, selector)` pair is made
+    /// while an earlier, still-active call to the same pair is on the
+    /// call stack at least `min_depth_delta` levels up. Read-only
+    /// `STATICCALL`s and already-returned calls never count.
     ReentrancyDepth { min_depth_delta: u32 },
     /// Fires if a governance proposal's voting power for a single
     /// address increases by more than `threshold_pct` within the window

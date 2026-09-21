@@ -15,5 +15,5 @@ pub use address::{Address, AddressParseError};
 pub use chain::ChainId;
 pub use confidence::{Confidence, SignatureMatch};
 pub use decision::PauseDecision;
-pub use event::{CallFrame, LogEvent, TxEvent};
+pub use event::{CallFrame, CallKind, LogEvent, TxEvent};
 pub use signature::{Condition, ConditionKind, Signature, SignatureCategory};

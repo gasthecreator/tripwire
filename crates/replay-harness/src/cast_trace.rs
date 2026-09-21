@@ -17,7 +17,7 @@ use std::str::FromStr;
 
 use serde_json::Value;
 use thiserror::Error;
-use tripwire_core::{Address, CallFrame};
+use tripwire_core::{Address, CallFrame, CallKind};
 
 #[derive(Debug, Error)]
 pub enum TraceError {
@@ -122,13 +122,13 @@ fn frame_from_node(node: &Value) -> Result<CallFrame, TraceError> {
         t.get("depth")
             .and_then(Value::as_u64)
             .ok_or_else(|| TraceError::Malformed("trace missing `depth`".into()))? as u32;
-    let kind = text("kind")?;
+    let kind = CallKind::parse(text("kind")?);
     let data = t.get("data").and_then(Value::as_str).unwrap_or("");
 
     // Only message calls carry a function selector; for CREATE the data
     // is initcode, whose first 4 bytes are meaningless as a selector.
-    let is_message_call = matches!(kind, "CALL" | "STATICCALL" | "DELEGATECALL" | "CALLCODE");
-    let selector = (is_message_call && data.len() >= 10).then(|| data[..10].to_ascii_lowercase());
+    let selector =
+        (kind.is_message_call() && data.len() >= 10).then(|| data[..10].to_ascii_lowercase());
 
     // A value too large for u128 (>3.4e20 ETH) cannot occur on mainnet.
     let value_wei = u128::from_str_radix(text("value")?.trim_start_matches("0x"), 16).unwrap_or(0);
@@ -139,6 +139,7 @@ fn frame_from_node(node: &Value) -> Result<CallFrame, TraceError> {
         to: addr("address")?,
         selector,
         value_wei,
+        kind,
     })
 }
 
@@ -250,5 +251,31 @@ mod tests {
             r#"{{"arena":[{{"parent":null,"children":[],"trace":{{"kind":"CALL","depth":0,"caller":"zz","address":"{C}","data":"0x","value":"0x0"}}}}]}}"#
         );
         assert!(frames_from_cast_json(&bad).is_err());
+    }
+
+    #[test]
+    fn maps_every_trace_kind_onto_call_kind() {
+        let json = doc(&[
+            node("null", "[1,2,3,4]", "CREATE", 0, "0x60806040", "0x0"),
+            node("0", "[]", "CALL", 1, "0xaaaaaaaa00", "0x0"),
+            node("0", "[]", "STATICCALL", 1, "0xbbbbbbbb00", "0x0"),
+            node("0", "[]", "DELEGATECALL", 1, "0xcccccccc00", "0x0"),
+            node("0", "[]", "CALLCODE", 1, "0xdddddddd00", "0x0"),
+        ]);
+        let kinds: Vec<_> = frames_from_cast_json(&json)
+            .unwrap()
+            .iter()
+            .map(|f| f.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                CallKind::Create,
+                CallKind::Call,
+                CallKind::StaticCall,
+                CallKind::DelegateCall,
+                CallKind::CallCode
+            ]
+        );
     }
 }

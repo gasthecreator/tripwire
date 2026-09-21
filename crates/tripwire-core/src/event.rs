@@ -42,9 +42,57 @@ pub struct LogEvent {
     pub data: String,
 }
 
-/// One frame of a transaction's internal call trace. A reentrancy
-/// signature looks for the same `(to, selector)` pair recurring at a
-/// depth greater than its first occurrence within one `TxEvent`.
+/// The EVM call variant that produced a [`CallFrame`]. Matters for
+/// detection: a `StaticCall` cannot modify state, so it can never be the
+/// re-entering half of a reentrancy exploit, and treating read-only
+/// lookups such as `balanceOf` as re-entry made the generic reentrancy
+/// signature fire on ordinary transactions (found by scoring the real
+/// Beanstalk exploit trace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallKind {
+    #[default]
+    Call,
+    StaticCall,
+    DelegateCall,
+    CallCode,
+    Create,
+}
+
+impl CallKind {
+    /// Parses the kind names emitted by geth's `callTracer` (`type`) and
+    /// Foundry's `cast run --json` (`kind`), case-insensitively.
+    ///
+    /// Anything unrecognised maps to `Call`, deliberately: an unknown kind
+    /// might be state-changing, and silently classing it as read-only
+    /// would hide a possible re-entry from the detector. The cost of the
+    /// conservative default is at worst the old (noisier) behaviour.
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_uppercase().as_str() {
+            "STATICCALL" => CallKind::StaticCall,
+            "DELEGATECALL" => CallKind::DelegateCall,
+            "CALLCODE" => CallKind::CallCode,
+            "CREATE" | "CREATE2" => CallKind::Create,
+            _ => CallKind::Call,
+        }
+    }
+
+    /// True for the variants that carry a function selector in calldata.
+    pub fn is_message_call(self) -> bool {
+        !matches!(self, CallKind::Create)
+    }
+
+    /// True if this frame is read-only by construction.
+    pub fn is_static(self) -> bool {
+        matches!(self, CallKind::StaticCall)
+    }
+}
+
+/// One frame of a transaction's internal call trace. Frames are stored
+/// in execution (pre-order) order, and `depth` is the call-stack depth —
+/// together these let a consumer reconstruct which earlier frames are
+/// still active ancestors of a given frame, which is what real
+/// reentrancy detection needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallFrame {
     pub depth: u32,
@@ -55,6 +103,8 @@ pub struct CallFrame {
     /// calldata.
     pub selector: Option<String>,
     pub value_wei: u128,
+    #[serde(default)]
+    pub kind: CallKind,
 }
 
 #[cfg(test)]
@@ -69,6 +119,7 @@ mod tests {
             to: Address::from_str("0x0000000000000000000000000000000000000002").unwrap(),
             selector: Some("0xa9059cbb".into()),
             value_wei: 0,
+            kind: CallKind::Call,
         }
     }
 
@@ -129,5 +180,37 @@ mod tests {
         let json = serde_json::to_string(&tx).unwrap();
         let back: TxEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(tx, back);
+    }
+
+    #[test]
+    fn call_kind_parses_tracer_names_case_insensitively() {
+        assert_eq!(CallKind::parse("STATICCALL"), CallKind::StaticCall);
+        assert_eq!(CallKind::parse("staticcall"), CallKind::StaticCall);
+        assert_eq!(CallKind::parse("DELEGATECALL"), CallKind::DelegateCall);
+        assert_eq!(CallKind::parse("CALLCODE"), CallKind::CallCode);
+        assert_eq!(CallKind::parse("CREATE"), CallKind::Create);
+        assert_eq!(CallKind::parse("CREATE2"), CallKind::Create);
+        assert_eq!(CallKind::parse("CALL"), CallKind::Call);
+    }
+
+    #[test]
+    fn unknown_call_kind_is_conservatively_state_changing() {
+        assert_eq!(CallKind::parse("SOMETHING_NEW"), CallKind::Call);
+        assert!(!CallKind::parse("SOMETHING_NEW").is_static());
+    }
+
+    #[test]
+    fn only_staticcall_is_static_and_only_create_lacks_a_selector() {
+        assert!(CallKind::StaticCall.is_static());
+        assert!(!CallKind::DelegateCall.is_static());
+        assert!(!CallKind::Create.is_message_call());
+        assert!(CallKind::Call.is_message_call());
+    }
+
+    #[test]
+    fn frame_without_kind_field_deserializes_as_call() {
+        let json = r#"{"depth":0,"from":"0x0000000000000000000000000000000000000000","to":"0x0000000000000000000000000000000000000002","selector":null,"value_wei":0}"#;
+        let f: CallFrame = serde_json::from_str(json).unwrap();
+        assert_eq!(f.kind, CallKind::Call);
     }
 }
