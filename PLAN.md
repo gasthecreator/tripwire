@@ -1,485 +1,282 @@
-# Worklog
-
-A running, dated log of every substantive piece of work done on Tripwire.
-Treat this the way you'd treat engineering documentation at an actual job:
-if it's not logged here, it didn't happen. This is a record for a future
-technical walkthrough as much as it is a build log — write entries so
-someone with no context on the session can understand what changed and why.
-
-Newest entries at the top.
-
----
-
-## How to write an entry
-
-```
-## [YYYY-MM-DD] Short title
-
-**Author:** Claude Code / Gideon
-
-**What:** ...
-**Why:** ...
-**Verified:** how this was actually tested, against what (real infra > mocks)
-```
-
----
-
-## [2026-09-21] Real baselines, a third exploit (Warp Finance), and generic detection on all three
-
-**Author:** Claude Code
-
-**What:** (1) New `tripwire-context` crate = the production `ContextSource`
-(trait moved into `detection` to avoid a dependency cycle): worst-asset
-outflow fraction vs the holder's balance at block-1 (ERC-20 logs net of
-inflows; native ETH from the trace), Uniswap-V2 spot-price movement from
-`Sync` events vs `getReserves` at block-1, optional `cast run` trace
-fallback (moved from replay-harness), multi-holder support, everything
-failing closed. Wired into the daemon via env vars; the daemon warns
-loudly if no watched assets are configured. (2) `CallAny` condition (any-of
-selector set) and a rewritten `flash-loan-drain.yaml` covering the
-well-known flash-loan entrypoints (only Aave's `0xab9c4b5d` validated on
-real traces; the others computed from documented interfaces). (3) Third
-real exploit, the oracle-manipulation slot: **Warp Finance** (Dec 2020),
-identified by block timestamp + Uniswap `Sync` events and corroborated
-against the published amounts. My first oracle candidate, Harvest Finance,
-turned out useless for this: its Curve swaps executed only 0.03-0.05% off
-parity, so a price-deviation percentage can't detect that class — a real
-limitation, recorded, not papered over. (4) The replay tests now use the
-production context, and score the **shipped, un-tuned** signatures.
-
-**Result:** generic signatures pause on Beanstalk (100), Euler (85) and
-Warp (100) with only each protocol's asset list configured.
-
-**Two more scoring-policy bugs surfaced on the way, both by scoring real
-data:** adding flash-loan evidence let call-pattern facts alone (re-entry
-65 + flash entrypoint 25 = 90) pause Beanstalk with no fund movement; and
-on Warp a price move (55) + a re-entry (30) = 85 paused with the drain
-removed. Fix: an enforced "harm rule" — all evidence lacking a harm fact
-(funds/voting power) must sum below the threshold — with weights retuned
-(fund flow 70; price 30; re-entry, flash entrypoint, call sequence 15
-each), plus a test that a harm fact plus any single supporting fact still
-pauses so the invariant isn't met by making everything too weak.
-
-**Verified:** 23 pure-logic tests + 9 live-anvil tests for the context
-crate; 3 live mainnet replays each asserting generic pause AND the
-adversarial variants (lone drain, price-only, no-baseline call patterns)
-staying below threshold; 169 Rust tests, clippy/fmt clean. Every token
-address configured for a replay was checked on-chain first.
-
-**Honest limits:** three exploits are three data points, and the
-false-positive rate on legitimate traffic is still unmeasured (next).
-Governance voting-power sourcing and non-V2 oracles aren't implemented.
-
----
-
-## [2026-09-21] The daemon was broken: rewrite as a reorg-aware engine, test on a real chain
-
-**Author:** Claude Code
-
-**What:** Re-reading `poll_once` against ARCHITECTURE.md §3.2 turned up
-that the shipped daemon (marked "done" in PLAN.md Slice 5) had never been
-tested end-to-end and was broken in ways no existing test could see: (1)
-with the default `min_confirmations = 1`, a transaction seen in the head
-block had 0 confirmations, hit `continue`, and its block was then marked
-processed, so it was never looked at again — the daemon could not pause
-anything; (2) it filtered on `tx.to == target`, but both real exploits
-replayed in this repo were sent to attacker contracts (the target appears
-only in logs/internal calls), so it would have missed both; (3) no reorg
-handling despite the architecture promising it; (4) no idempotency (a
-second exploit tx would try to re-pause and revert), and an RPC error
-mid-loop reprocessed blocks. Rewrote it as `tripwire_daemon::engine`:
-follows the chain with a remembered window of block hashes and rewinds on
-reorg (including chain shortening and reorgs deeper than the window);
-keeps pending pause decisions and re-checks them every tick against the
-canonical chain and required depth; cancels a pause whose block was
-reorged away; checks `paused()` first (fail toward action if unreadable);
-retries failed pauses; reads each block's header before and after its
-transactions and discards inconsistent reads; bounds catch-up per tick.
-Relevance is now `touches_target` (to/from, internal calls, logs emitted
-by or naming the target). Added `BlockHeader` + `block_header()` to the
-chain adapter, `is_paused` to the guardian client, and `ContextSource` (a
-hook for call-trace enrichment and real baselines) with `NoContext` as the
-default.
-
-**Verified:** 19 in-memory state-machine tests (reorg before/after
-confirmation, re-inclusion, shortening, deeper than window, mid-read
-change, retry, already-paused, duplicate txs, RPC failure, bounded
-catch-up, `touches_target` shapes) and 3 tests on a live `anvil` node with
-the real contracts, real adapter and real guardian client, including a
-**real reorg** (snapshot + revert) that cancels the pending pause.
-Local detect -> pause latency ~265 ms (one confirmation).
-
-**Still true, not fixed here:** `NoContext` means fund-flow/oracle/
-governance conditions fail closed in the running daemon, and call-trace
-conditions only work if the RPC serves `debug_traceTransaction`; real
-baseline sourcing and an in-process tracer are the next items.
-
----
-
-## [2026-09-21] Fix evidence double-counting in scoring (found by the Euler replay)
-
-**Author:** Claude Code
-
-**What:** `detection::score` summed every matched condition across every
-signature. The three shipped signatures each contain an outflow
-(`fund_flow_delta`) condition, so a single large outflow scored 60 + 40 +
-30 = 130 -> clamped to 100 and paused on its own; any legitimate
-withdrawal above ~20% of a balance would have paused a protocol. Fix:
-`ConditionKind::evidence_key` names the underlying fact (thresholds
-excluded; call sequences keyed by normalised selectors); each signature
-keeps its distinct evidence (highest weight per fact), and the decision
-sums distinct evidence across all signatures, recording `counted_evidence`
-(key, weight, source signature/condition) so a pause or near miss is
-diagnosable. Hand-built matches without evidence still score (as one fact
-each) rather than silently scoring zero.
-
-**Why:** Corroboration means different facts, not one fact repeated. This
-is a core promise (ARCHITECTURE.md §3.3, SECURITY.md T2) that the tests
-did not actually check against the shipped signature set.
-
-**Verified:** 9 new engine unit tests, 3 core tests, and
-`crates/detection/tests/shipped_signatures.rs` against the real YAML —
-the whale-withdrawal test was run against the pre-fix engine in a
-throwaway worktree and fails there ("25% outflow alone scored 100 and
-would pause"). Live: generic set on Euler 100.0 -> 60.0 (asserted);
-incident-tuned Euler (95.0) and Beanstalk (95.0, generic 65.0) unchanged.
-
-**Process note:** the first commit of this fix went out with the README
-and WORKLOG edits silently skipped (a doc-patch script failed on an
-assertion but the shell carried on to commit). Caught by re-reading the
-diff; fixed in a follow-up commit. Lesson: don't chain `git commit` after
-an unchecked script.
-
----
-
-## [2026-09-21] Second real exploit: Euler Finance (found on-chain), and a scoring flaw it exposed
-
-**Author:** Claude Code
-
-**What:** Found Euler's first attack transaction on-chain instead of via
-web summaries: free-tier `eth_getLogs` is capped at 10 blocks, so scanned
-Aave V2 `FlashLoan` events in 10-block windows around 13 Mar 2023 for a
-30,000,000 DAI loan -> tx `0xc310a0af…b111d`, block 16817996. Confirmed
-on Etherscan (sender "Euler Finance Exploiter 3", recipient "Euler
-Exploit Contract 1", success). My first anchor (Euler's `Liquidation`
-event on the main proxy) returned nothing — Euler emits via per-market
-proxies — so anchors need checking too. Added
-`replay_harness::support` (skip logic, real-tx loader, ERC-20 net-outflow
-from receipt logs, historical balance via `cast call`, fund-flow
-`Baseline`; 7 unit tests) and `tests/euler_flash_loan_drain.rs`; replaced
-the Solidity Euler placeholder with a live replay.
-
-**Verified live:** real trace 151 frames (depth 11); Euler DAI balance
-8,904,507 -> 0 (net of the repaid 30M flash loan); incident-tuned
-signature (Aave callback + `donateToReserves` `0x36f022aa`, computed from
-Euler's own EToken.sol, + 50% balance drain) scores 95.0 vs 80.0;
-Solidity replay asserts the same drain.
-
-**Flaw found:** the shipped generic signatures score 100.0 on Euler, but
-all three matches (`flash-loan-drain` 60, `oracle-manipulation` 40,
-`reentrancy-basic` 30) come from the same single outflow fact, summed
-three times. Any legitimate withdrawal above ~20% of a balance would
-also pause. This contradicts the corroboration rule in ARCHITECTURE.md
-§3.3 / SECURITY.md T2, and no synthetic test caught it. Recorded in
-PLAN.md and README.md; the test prints (does not assert) the generic
-result so the flaw isn't enshrined. Fix is next, as its own PR.
-
----
-
-## [2026-09-21] Fix the reentrancy false positive found on the real Beanstalk trace
-
-**Author:** Claude Code
-
-**What:** The generic `reentrancy-basic` condition matched the real
-Beanstalk trace 36 times though it contains no classic reentrancy. Two
-flaws: (1) `CallFrame` had no call kind, so read-only STATICCALLs
-(`balanceOf`, `totalSupply`) counted as re-entry; (2) the "earlier call"
-only had to appear earlier in the trace, not still be on the call stack,
-so a call that had already returned counted as re-entered. Fix: added
-`CallKind` (Call/StaticCall/DelegateCall/CallCode/Create; unknown maps to
-Call, conservatively state-changing) to `CallFrame`, populated by both
-trace sources (chain-adapter callTracer `type`, `cast run` `kind`; CREATE
-frames no longer get initcode-as-selector); the condition now keeps a
-stack of active ancestors (rebuilt from pre-order frames + depth) and
-flags only a non-static call re-entering a non-static active ancestor
-with the same (target, selector). 8 new detector tests, 4 core, 2
-adapter, 1 cast_trace.
-
-**Why:** Left as-is, this would fire on ordinary busy transactions; a
-pause is a serious action against a live protocol.
-
-**Verified:** Live on the real trace: matches 36 -> 1. The one remaining
-match is real, not a bug: `uniswapV2Call` (0x10d1e85c) re-entered at
-depth 8 while its depth-6 invocation on the attacker's contract is
-active (chained flash swaps). It scores 65.0 alone, under the 80.0
-threshold, because the signature needs an outflow to corroborate; the
-live test asserts exactly that shape (and my first version of the
-assertion expected zero matches, which running it live proved wrong).
-Also fmt, clippy `-D warnings`, full test suite green.
-
----
-
-## [2026-09-21] Score a real exploit trace live via `cast run` (no paid trace API)
-
-**Author:** Claude Code
-
-**What:** Free-tier RPC blocks trace methods, but `cast run <tx> --json`
-re-executes a transaction locally at its true block position using only
-state-read calls. Added `replay_harness::cast_trace` (JSON → `CallFrame`s,
-walking `children` from the single root; CREATE frames get no selector;
-6 unit tests) and switched the Beanstalk test to it. Live result: 349
-frames, depth 16, incident-tuned signature scores 95.0 vs 80.0. Also
-scored the shipped generic signatures on the same trace: 65.0
-(`reentrancy-basic` only), below threshold — but that match is a
-false-positive pattern: the condition counted 36 recurring (target,
-selector) pairs, mostly read-only STATICCALLs (`balanceOf`,
-`totalSupply`), because `CallFrame` records no call kind.
-
-**Why:** The incident-tuned signature was built from selectors known to
-be in the exploit, so passing it proves plumbing, not detection. Scoring
-the generic set alongside keeps that distinction honest, and it surfaced
-a real weakness no synthetic test had.
-
-**Verified:** Live against the free-tier archive RPC (test passes,
-~60s); no-key skip path; fmt, clippy `-D warnings`, 84 Rust tests green.
-
----
-
-## [2026-09-21] First live RPC run: fix the Beanstalk fork test, learn the free-tier limit
-
-**Author:** Claude Code
-
-**What:** With an Alchemy free-tier archive key (passed via env var only,
-never written to a file), ran the replay tests live for the first time.
-Findings: (1) the Solidity Beanstalk test, which had only ever been
-compile- and skip-path-checked, could not have worked — `vm.rpc`
-returns ABI-decoded data rather than a JSON string, and the target
-transaction has `to == null` (it is a contract creation whose constructor
-ran the whole exploit). Rewrote it to use Foundry's transaction-aware
-fork (`createSelectFork(url, txHash)` + `vm.transact`), which applies
-earlier same-block transactions and preserves creation semantics, and to
-assert observable effect: 4 ERC-20 transfers out of the Beanstalk
-diamond across 121 logs. (2) The Rust `replay-harness` test still can't
-run live: the free tier rejects `debug_traceTransaction` and
-`trace_transaction`, and anvil forks proxy historical-tx traces
-upstream. A local re-execution (fork at N-1, impersonate, resend
-calldata) produced a 170-frame trace with both selectors but reverted
-(`LibDiamondCut: _init address has no code`), so it is not faithful and
-was not adopted as a fixture.
-
-**Why:** A test that has never run against the real thing is a claim, not
-evidence — the earlier version looked finished and was not.
-
-**Verified:** Live: `FOUNDRY_PROFILE=replay forge test` passes (Beanstalk
-replay real; three placeholders still skip). No-key skip path, `forge fmt
---check`, and the 19 unit tests unchanged and green.
-
----
-
-## [2026-09-14] Fix a real CI-only build-order bug (sol! macro needs contracts built first)
-
-**Author:** Claude Code
-
-**What:** After pushing the `alloy` 1.x upgrade, CI's `fmt, clippy, build`
-job still failed — a genuinely different bug from the two already fixed
-this session, not a flake. `guardian-client`'s `sol!` macro invocations
-(`tests/guardian_anvil.rs`) read `contracts/out/Guardian.sol/Guardian.json`
-and `.../GuardedVault.sol/GuardedVault.json` at **Rust compile time** to
-generate contract bindings, not only when the test actually runs. The
-`lint-and-build` job never ran `forge build`, so `cargo clippy
---all-targets` (which compiles test binaries) failed with "failed to
-canonicalize path." This didn't surface locally earlier only because
-`contracts/out/` already existed on disk from prior `forge build` runs
-in this same working directory. Reproduced locally by deleting
-`contracts/out/` and re-running `cargo clippy` (confirmed the exact same
-failure), then fixed by adding Foundry setup + `forge build` to the
-`lint-and-build` job before the Rust steps, and documented the required
-build order (contracts before Rust, always) in `CONTRIBUTING.md` and
-`README.md`, since it isn't obvious.
-
-**Why:** Order-of-operations bugs like this are exactly what CI running
-on a genuinely clean checkout is for — a long-lived local working
-directory papers over exactly this class of bug.
-
-**Verified:** Reproduced the failure locally first (`rm -rf contracts/out
-&& cargo clippy -p guardian-client --all-targets` fails with the same
-error CI showed), then confirmed the fix resolves it (`forge build` then
-`cargo clippy --workspace --all-targets --all-features -- -D warnings`
-clean). Full `cargo test --workspace` still green (78 tests).
-
----
-
-## [2026-09-14] Fix real CI failures: pinned deps + alloy upgrade for a real CVE
-
-**Author:** Claude Code
-
-**What:** Opened PR #1 for the detection-wiring work and its first CI run
-surfaced two genuine bugs, not flakes: (1) `forge install` with no
-arguments is a no-op when dependencies were fetched with `--no-git` (no
-`.gitmodules` recorded) — every workflow and doc now runs the two
-explicit pinned installs (`forge-std@v1.16.2`,
-`openzeppelin-contracts@v5.7.0`) instead; (2) `cargo audit` found two
-real vulnerabilities in `ruint` (RUSTSEC-2026-0220, RUSTSEC-2025-0137),
-transitively pinned by `alloy` 0.9.2. Fixed by upgrading the whole
-workspace from `alloy` 0.9 to 1.x (currently resolving to 1.8.3) across
-`chain-adapter`, `guardian-client`, and `tripwire-daemon`, which also
-let the earlier serde version pin (`=1.0.219`, worked around an
-`alloy-consensus` 0.9.2 / newer-serde incompatibility) be removed
-entirely. Fixed the resulting API breaks: `RootProvider`/`Provider` lost
-their transport type parameter, `.on_http()` → `.connect_http()`,
-`.with_recommended_fillers()` is gone (fillers on by default now, use
-`.disable_recommended_fillers()` for a read-only provider),
-`get_block_by_number` takes one argument now (`.full()` chained
-separately), and RPC `Transaction.from` moved back under
-`.inner.signer()`.
-
-**Why:** A security product shipping with a Cargo.lock pinned to
-dependencies with known CVEs would fail exactly the due-diligence
-review this project is supposed to survive — upgrading was the right
-call over suppressing the audit finding.
-
-**Verified:** `cargo audit` exit code 0 (zero errors; three
-warning-level unmaintained/unsound-but-inapplicable advisories remain,
-documented in `SECURITY.md` §3.1). `cargo fmt --all --check`, `cargo
-clippy --workspace --all-targets --all-features -- -D warnings`, `cargo
-test --workspace` (78 tests), `forge fmt --check`, and `forge test` (19
-tests) all clean after the upgrade — including the real end-to-end test
-that deploys actual contracts to a live `anvil` node and pauses them via
-`guardian-client`, which kept working unchanged through the alloy major
-version bump.
-
----
-
-## [2026-09-14] Wire the Beanstalk replay into the real detection engine
-
-**Author:** Claude Code
-
-**What:** Created `~/tripwire`'s GitHub remote (`gasthecreator/tripwire`,
-public) and established `main` from the initial scaffold commit (a
-repo-genesis exception to the branch+PR rule — nothing existed to review
-against yet). Built `crates/replay-harness`: fetches the real Beanstalk
-exploit transaction's actual decoded call trace from a real archive RPC
-(via `chain-adapter`) and scores it through the real `detection` engine,
-closing the gap the previous session's Solidity-only fork replay left
-open (proving the transaction *replays* is not the same as proving the
-*detector would have fired*). The signature used is built from two
-independently-verified real selectors: `emergencyCommit(uint32)`
-(`0x73015684`), computed locally from the exact function signature
-quoted from Beanstalk's own public source (`GovernanceFacet.sol`,
-commit `ee4720cdb449d5b6ff2b789083792c4395628674`,
-github.com/BeanstalkFarms/Beanstalk), and Aave V2's standard
-`executeOperation` flash-loan callback (`0x920f5c84`, a fixed public
-interface, not incident-specific). Added a `replay` job to
-`rust-ci.yml`, gated the same way as `foundry-ci.yml`'s replay job.
-
-**Why:** Gideon flagged this as the highest-value remaining piece after
-reviewing the initial scaffold's honest gap list — the brief's core
-validation claim ("prove the system would have detected... within your
-stated latency target") wasn't actually proven by a Solidity-only replay
-that never touched the Rust detector.
-
-**Verified:** `cargo build -p replay-harness --tests` and `cargo clippy
---workspace --all-targets --all-features -- -D warnings` clean.
-`cargo test --workspace` green (78 tests). The new test's no-RPC-key
-skip path runs and exits cleanly, matching every other network-dependent
-test in this repo — but **the test has not yet executed against live
-data**, since no archive-RPC key is configured yet. That's the honest
-state to log here, not "done."
-
----
-
-## [2026-09-14] Full first implementation pass: detection engine, guardian contracts, end-to-end wiring
-
-**Author:** Claude Code
-
-**What:** Built out every core component from `ARCHITECTURE.md` §3 for
-real, not as stubs: `tripwire-core` (chain-agnostic types, 35 tests),
-`chain-adapter`'s `EvmAdapter` on `alloy` (block/tx/log/call-trace
-decoding, tested against a real locally-spawned `anvil` node), `detection`
-(signature loading + 5 condition evaluators + additive confidence
-scoring, 36 tests including explicit false-positive cases),
-`Guardian.sol`/`GuardedVault.sol` on OpenZeppelin primitives (19 Foundry
-tests: role boundaries, a live reentrancy attack simulation, a full
-`TimelockController` unpause-delay test, 512-run fuzz), `guardian-client`
-(signs/submits pause txs via `alloy`), and `tripwire-daemon` (polls,
-evaluates, pauses). Proved the whole chain actually interoperates with an
-integration test that deploys the real compiled contracts to a live
-`anvil` node and pauses `GuardedVault` entirely through
-`guardian_client::connect`/`submit_pause` — not a unit test in isolation.
-Ran Slither against the contracts (one accepted finding, documented).
-Verified one real historical exploit (Beanstalk, Apr 2022) directly
-against Etherscan and replayed its actual transaction against a real
-mainnet fork.
-
-**Why:** This is the brief's core deliverable set — architecture docs
-alone (already written earlier this session) don't demonstrate the
-system works; only real, passing tests against real infrastructure do,
-per the standing project preference for testing against real
-infrastructure over mocks (carried over from Pharos/Cascade Operator).
-
-**Verified:** `cargo test --workspace` green (77 Rust tests across 4
-crates, two of which spin up real `anvil` nodes). `forge test` green (19
-unit/fuzz tests). `FOUNDRY_PROFILE=replay forge test` green (4 tests,
-one a real fork replay, three honest skips). `cargo clippy --workspace
---all-targets --all-features -- -D warnings` clean. `forge fmt --check`
-clean. Slither clean except one documented, intentional finding.
-
-**Deliberately incomplete, not hidden** (see `PLAN.md`'s open
-questions and `README.md`'s status table for the full accounting):
-three of four historical exploits lack a verified tx hash (caught a real
-case of a web-search summary inventing a wrong block number for
-Beanstalk — 14,895,611 instead of the actual, Etherscan-confirmed
-14,602,790 — which is exactly why every number in this repo's replay
-tests is either independently verified or explicitly marked as not);
-the replayed fork isn't yet wired through the actual Rust detector; the
-daemon's `Baseline` is a placeholder, not sourced from real chain state.
-
----
-
-## [2026-09-14] Project scaffold, design docs, toolchain setup
-
-**Author:** Claude Code
-
-**What:** Initialized the repo (`~/tripwire`, on `feat/scaffold`). Wrote
-`ARCHITECTURE.md` (system design, corrected problem statement, competitive
-positioning, per-component tradeoffs), `PLAN.md` (living build checklist,
-10 slices, candidate historical-exploit list), and `SECURITY.md` (threat
-model for the guardian contract itself: hot-key compromise, false-positive
-griefing, listener DoS, unpause-path abuse, contract-logic bugs). Pulled
-portfolio conventions from `~/pharos` and `~/cascade-operator`
-(`CONTRIBUTING.md`'s PLAN-first / ARCHITECTURE_PROPOSALS.md /
-branch-and-PR discipline, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, MIT
-`LICENSE`) rather than reinventing them. Installed Rust (via `rustup`,
-stable channel, clippy + rustfmt components) and Foundry (via
-`foundryup`) — neither toolchain existed on this machine before this
-session.
-
-**Why:** Per the brief, no implementation code before the architecture is
-confirmed and documented. Gideon confirmed: repo name Tripwire (not
-"Sentry" — collides with Sentry.io branding) at `~/tripwire`; Rust over Go
-for the listener/detection engine (deliberate tech diversity against
-Pharos/Cascade Operator, both Go, and a real fit for the latency
-requirement); demo `GuardedVault` contract plus a documented third-party
-integration guide, not integration-guide-only.
-
-**Verified:** `rustc --version` / `cargo --version` / `forge --version` /
-`cast --version` / `anvil --version` all confirmed working post-install.
-No application code exists yet, so no functional verification applies to
-this entry.
-
-**Open, blocking Slices 2/6:** Gideon needs to sign up for an archive-RPC
-provider (Alchemy recommended) — not something this session can do on his
-behalf. Everything else can proceed without it.
-
-
-## Guardian hardening
-
-Added deploy-time safety (`registerTarget` checks, `DeployGuardian.sol` with post-condition verification), 14 deploy tests, 3 registerTarget tests, and a 7-invariant stateful fuzz suite. A first invariant version failed on my own handler bug (an admin legitimately granting a role to the 'attacker' actor); the invariant was corrected to 'every role holder was granted by an admin' rather than weakened. Mutation check: two deliberate Guardian bugs each caused a failure. Slither was not available locally, so it has not been run on this change. 37 Foundry tests pass.
-
-## False-positive study: what it found, and the mistakes on the way
-
-The study did its job: it found that the detector would have paused 8 legitimate transactions out of 1,855. Two causes, both design flaws rather than tuning: (a) fund flow looked at one asset and never at what came back (fixed with value netting, prices from the block before the tx, only watched assets netted, fallback to the strict rule when a price is missing); (b) evidence is shared across signatures, so the lowest fund-flow threshold anywhere (5%, in reentrancy-basic) became the harm threshold everywhere (fixed by aligning at 15% with a guard test).
-
-Mistakes worth keeping: I reported "0 would-pause" from a run in which 8 Aave candidates were never traced, and one of those was still a false pause. It was caught only because I rescored the eight known transactions directly instead of trusting the summary. The runner now traces every candidate, lists untraced ones per protocol, and prints a worst-case bound. Earlier still, rate limiting silently produced empty samples that read as "no outflows"; every RPC call now goes through a retrying proxy, and a run that loses data refuses to publish.
-
-The final result was in-sample. The different-seed holdout (1,771 fresh transactions, every candidate traced) also found 0 would-pause. That is what it can show: the fixes are not overfit to one sample. It cannot show the rate on other protocols or other eras.
+# Plan
+
+Living document — update this as work lands, not just once. See
+`ARCHITECTURE.md` for the design reasoning behind these slices;
+this file tracks what's built, what's next, and what's still an open
+question.
+
+## Status snapshot (2026-09-14)
+
+Core system is real and tested end-to-end against live local
+infrastructure: detection engine, chain adapter, guardian contracts, and
+the daemon wiring all pass, including a test that deploys the actual
+compiled contracts to a live `anvil` node and pauses them through the
+real Rust `guardian-client` code path. One historical exploit (Beanstalk,
+Apr 2022) is verified against Etherscan and, as of 2026-09-21, its real
+transaction has been replayed live against a real mainnet fork on the
+Solidity side (`contracts/test/replay`, free-tier RPC, asserts real
+token outflow from the Beanstalk diamond). Its real call trace (349 frames, from `cast run` re-executing the
+transaction locally; no paid trace API needed) is scored live by the
+actual `detection` engine (`crates/replay-harness`): a signature built
+from two independently-verified real selectors reaches 95.0 vs an 80.0
+threshold. That signature was tuned to this incident, so it validates
+the pipeline, not generic detection: the shipped generic signatures
+score 65.0 on the same trace, below threshold. The gaps that matter
+most for anyone evaluating this beyond a portfolio context: (1) generic
+detection has still only been checked against one real trace — scoring
+it exposed a real false positive (the `reentrancy-basic` condition
+matched 36 times: read-only STATICCALLs such as `balanceOf`, and calls
+that had already returned), now fixed by recording `CallKind` on frames
+and requiring a state-changing re-entry into an *active ancestor*;
+one legitimate match remains (nested `uniswapV2Call` flash-swap
+callbacks) and stays below threshold by design; (2) three of four planned historical exploits still lack a verified
+tx hash; (3) the daemon's `Baseline` (the real chain-state context
+feeding fund-flow/oracle/governance conditions) is a placeholder — the
+scoring math is real and tested, but live sourcing for its inputs isn't
+wired yet. All three are called out in `README.md`'s status table, not
+just here.
+
+## Build checklist, in slices
+
+Each slice should be its own feature branch + PR (per Gideon's standing
+workflow preference — branch discipline even on solo projects), tested
+before merge, docs updated in the same PR as the code they describe.
+
+- [x] **Slice 0 — Scaffold.** Repo init, `ARCHITECTURE.md`, `PLAN.md`,
+      portfolio-standard meta files (`CONTRIBUTING.md`, `SECURITY.md`,
+      `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `LICENSE`) pulled from
+      `~/pharos`/`~/cascade-operator` conventions rather than reinvented.
+      Rust (via `rustup`) and Foundry (via `foundryup`) installed —
+      neither existed on this machine before this project.
+- [x] **Slice 1 — Core types + Rust workspace skeleton.** `tripwire-core`:
+      `ChainId`, `Address`, `TxEvent`, `LogEvent`, `CallFrame`,
+      `Signature`/`Condition`/`ConditionKind`, `Confidence`,
+      `SignatureMatch`, `PauseDecision`. 35 unit tests, all passing.
+- [x] **Slice 2 — EVM chain adapter.** `ChainAdapter` trait + `EvmAdapter`
+      (built on `alloy`) against a real Ethereum-compatible RPC: block
+      fetching, tx normalization, receipt log decoding, and
+      `debug_traceTransaction`-based call-frame extraction with graceful
+      degradation (empty call frames, not a hard failure) when a node
+      doesn't expose the debug namespace. Tested against a real, locally
+      spawned `anvil` node — not mocked — including a real signed
+      transaction sent, mined, and decoded back correctly, and a
+      block-not-found error path. **Not yet done:** mempool/pending-tx
+      websocket subscription (v1 only polls confirmed blocks); this is
+      an acceptable v1 simplification since the pause decision already
+      gates on confirmation depth, but it does mean detection currently
+      starts at 0-confirmation *mined* transactions, not truly pending ones.
+- [x] **Slice 3 — Signature format + detection engine.** YAML signature
+      schema (`tripwire-core::Signature`), directory loader
+      (`detection::load_signatures_from_dir`), five condition evaluators
+      (fund-flow delta, call sequence, oracle price deviation,
+      reentrancy depth, governance proposal anomaly), additive
+      confidence scoring. 36 unit tests, including explicit adversarial/
+      false-positive cases (a legitimate multi-hop call trace must not
+      look like reentrancy; a normal 2%-of-TVL withdrawal must not cross
+      a drain threshold; ordinary market volatility must not read as
+      oracle manipulation) and cases proving corroboration across
+      multiple weak signals can cross a threshold that no single signal
+      reaches alone.
+- [x] **Slice 4 — Guardian.sol + GuardedVault.sol.** OpenZeppelin
+      `AccessControl` + `Pausable` + `TimelockController` wiring exactly
+      as designed in `ARCHITECTURE.md` §3.4. 19 Foundry tests: role
+      boundaries (non-pauser can't pause, pauser can't unpause), a
+      malicious registered target attempting to reenter `Guardian.pause`
+      (blocked by role-based access control alone, no explicit
+      reentrancy guard needed — proven, not just asserted), a full
+      `TimelockController` unpause-delay integration test (execute
+      before the delay reverts, after it succeeds), a 512-run fuzz test
+      on withdrawal accounting, and a live simulated reentrant-withdrawal
+      attack against `GuardedVault` (blocked by `nonReentrant` +
+      checks-effects-interactions). Slither-clean except one accepted,
+      inline-documented finding (`low-level-calls`, required to support
+      smart-contract-wallet depositors).
+- [x] **Slice 5 — Guardian client + end-to-end wiring.** `guardian-client`
+      signs and submits `pause()` via `alloy`, refuses to submit a
+      decision that didn't cross its own threshold before ever touching
+      the network, and has no unpause method at all (that path is
+      intentionally separate and timelock-gated). `tripwire-daemon` wires
+      `ChainAdapter` → `detection::evaluate` → `GuardianClient` into one
+      polling loop with a confirmation-depth gate, startup validation
+      that its target is actually registered with the Guardian, and a
+      shutdown handler. The guardian-client half is proven end-to-end by an
+      integration test that deploys the real compiled `Guardian`/
+      `GuardedVault` bytecode to a live local `anvil`, registers the
+      vault, and pauses it through `guardian_client::connect` +
+      `submit_pause`, then confirms a non-pauser key using the same code
+      path fails on-chain. **Correction (2026-09-21):** the *daemon* half
+      had never been exercised end-to-end and was broken: with default
+      settings it could never pause anything (a transaction seen at 0
+      confirmations was skipped and its block then marked processed, so
+      it was never re-evaluated), it only looked at transactions whose
+      `to` was the target (both real exploits replayed here were sent to
+      attacker contracts), and it had no reorg handling, no idempotency
+      and reprocessed blocks after a mid-loop RPC error. Rewritten as
+      `tripwire_daemon::engine` (canonical-chain tracking with a reorg
+      window, pending pauses re-checked every tick and cancelled if their
+      block is reorged away, an `is_paused` check, retry on failure,
+      bounded catch-up), with 19 in-memory state-machine tests and 3
+      live-`anvil` tests including a real reorg.
+- [ ] **Slice 6 — Historical exploit replay harness.** Foundry fork tests
+      against real mainnet history. **Status: three of four done.**
+      Beanstalk Farms (Apr 17, 2022) is verified — tx
+      `0xcd314668aaa9bbfebaf1a0bd2b6553d01dd58899c508d4729fa7311dc5d33ad7`,
+      block 14602790, confirmed directly against Etherscan on
+      2026-09-14 — and, verified live 2026-09-21, replays against a real
+      mainnet fork (`contracts/test/replay/HistoricalExploits.t.sol`).
+      That transaction is a **contract creation** (`to` is null; the
+      exploit ran in a constructor), so the test uses Foundry's
+      transaction-aware fork (`createSelectFork(url, txHash)` +
+      `vm.transact`), which applies earlier same-block transactions and
+      preserves creation semantics; it asserts real ERC-20 outflows from
+      the Beanstalk diamond (4 observed), not merely a non-revert. An
+      earlier `vm.rpc`-based version of this test could never have
+      worked (wrong return format, and no handling of a null `to`); it
+      only looked fine because it had never run against a real RPC. **Second case verified 2026-09-21: Euler Finance
+      (Mar 13, 2023)** — tx `0xc310a0af…b111d`, block 16817996, found
+      on-chain (Aave V2 `FlashLoan` event for exactly 30,000,000 DAI)
+      rather than from a web summary, then confirmed on Etherscan (sender
+      "Euler Finance Exploiter 3", recipient "Euler Exploit Contract 1").
+      Solidity replay asserts Euler's DAI balance 8,904,507 -> 0; Rust
+      replay (`tests/euler_flash_loan_drain.rs`, real 151-frame trace,
+      real fund-flow `Baseline` from archive balance + receipt logs)
+      scores an incident-tuned signature at 95.0 vs 80.0. **Third case
+      verified 2026-09-21: Warp Finance (Dec 17, 2020), the oracle-
+      manipulation slot** — tx `0x8bb8dc5c…95090`, block 11473330. Etherscan
+      gives it no label and the write-ups omit the hash, so it was found by
+      block timestamp (exactly 22:24:41 UTC, Warp's published attack time)
+      and the Uniswap V2 DAI/WETH pair's `Sync` events (a 341,217 WETH
+      swap), then corroborated by matching the published figures against the
+      receipt (94,349.3 LP minted, 3.86M DAI and 3.92M USDC borrowed from
+      two `WarpVaultSC` contracts). **Generic detection result on all three
+      real exploits:** the *shipped, un-tuned* signatures pause on
+      Beanstalk (100), Euler (85) and Warp (100), configured with only each
+      protocol's own asset list, and adversarial variants (a lone drain, a
+      price move alone, call patterns alone) stay below threshold. The
+      remaining signature-diversity slot (reentrancy — candidate dForce
+      Apr 2020 or Fei/Rari Apr 2022) is still an explicitly-skipped
+      placeholder test rather than filled with an unverified hash. **Scoring flaw found on Euler, now fixed:** the shipped generic
+      signatures scored 100.0 on it, but only because a single fact (the
+      large outflow) satisfied a condition in three different signatures
+      and was summed three times — so any legitimate withdrawal above
+      ~20% of a balance would also have reached the pause threshold,
+      contradicting ARCHITECTURE.md §3.3 / SECURITY.md T2. Confidence now
+      sums *distinct evidence* (each fact once, at its highest weight),
+      with the counted evidence recorded on the decision; the generic set
+      now scores 60.0 on Euler (below threshold, as it should absent
+      corroboration) and a regression test against the shipped YAML
+      proves a lone outflow of 10-100% never pauses (verified to fail on
+      the pre-fix engine). **Cross-language detection wiring is now done for
+      this one case:** `crates/replay-harness/tests/beanstalk_governance_exploit.rs`
+      fetches the real transaction's actual decoded call trace (via
+      `chain-adapter`, from a real archive RPC) and runs it through the
+      real `detection` engine, using a signature built from two
+      independently-verified real selectors — `emergencyCommit(uint32)`
+      (`0x73015684`, computed from the exact function signature quoted
+      from Beanstalk's own public source, `GovernanceFacet.sol` at
+      commit `ee4720cdb449d5b6ff2b789083792c4395628674`) and Aave V2's
+      standard flash-loan callback (`0x920f5c84`, a fixed public
+      interface, not incident-specific). The test asserts both
+      selectors are actually present in the real trace and that the
+      resulting confidence crosses threshold. **Now run live (2026-09-21):** the Alchemy free tier rejects
+      `debug_traceTransaction`/`trace_transaction` and anvil forks proxy
+      historical traces upstream, but `cast run <tx> --json` re-executes
+      the transaction locally at its true block position using only
+      free-tier state calls. `replay-harness` (`src/cast_trace.rs`, 6
+      unit tests) converts that trace to call frames; the live test
+      finds 349 frames (depth 16), both selectors, confidence 95.0. A
+      naive local re-execution (fork at N-1, impersonate, resend calldata)
+      had produced a reverted, unfaithful trace — same-block state
+      matters. `rust-ci.yml`'s `replay` job runs it in CI once
+      `ETH_RPC_URL`/`RUN_REPLAY_TESTS` are configured.
+- [x] **Slice 7 — False-positive validation (done, with caveats).**
+      `replay-harness` `fp_study`: seeded random 10-block windows from
+      blocks 17.0M-20.5M, every ERC-20 outflow from Aave V2 (734 txs),
+      Compound V2 (177) and Curve 3pool (944) scored by the production
+      context and the shipped signatures; candidates with a fund-flow fact are
+      traced with `cast run`. **It found two real detector flaws**: the
+      first complete run would have paused **8 legitimate transactions**
+      (value-neutral swaps, a borrow against fresh collateral, flash-loan
+      refinancing), caused by (a) measuring one asset's outflow without the
+      value coming back and (b) the lowest fund-flow threshold in the set
+      (5%) acting as the harm threshold for every signature. Fixed by
+      value-netted fund flow and aligned 15% thresholds (guard test). Final
+      run: **0 would-pause, every candidate traced**; 95% upper bound about
+      1 false pause/day per protocol (`docs/FALSE_POSITIVES.md`).
+      **Caveats:** that run is *in-sample* (fixes were made after seeing those
+      transactions). A different-seed holdout
+      (`docs/FALSE_POSITIVES_HOLDOUT.md`, 1,771 fresh transactions, all
+      candidates traced) also found 0 would-pause, which guards against
+      overfitting to the sample but not against other protocols or eras. Native-ETH and non-V2 price movement
+      are out of scope; three protocols are not "DeFi"; and 0 of ~1,900
+      is a bound, not a proof. An intermediate run wrongly reported 0 pauses
+      with 8 candidates untraced; the runner now reports untraced candidates
+      and a worst-case bound.
+- [x] **Slice 8 — Real baseline sourcing (mostly).** New
+      `tripwire-context` crate, wired into the daemon
+      (`TRIPWIRE_WATCHED_TOKENS`, `TRIPWIRE_EXTRA_HOLDERS`,
+      `TRIPWIRE_WATCH_NATIVE`, `TRIPWIRE_TRACK_AMM_PRICES`,
+      `TRIPWIRE_TRACE_FALLBACK`): **fund flow** = the worst single-asset
+      drain (fraction of the balance that left), from ERC-20 `Transfer`
+      logs net of inflows (so a repaid flash loan nets out) against the
+      holder's balance at the *previous block*, plus native ETH from the
+      call trace; **price movement** = the largest relative spot-price move
+      of any Uniswap-V2-style pool in the transaction, from `Sync` events
+      against `getReserves` at the previous block; **call traces** from the
+      node when it serves them, else optionally `cast run` (slow but works
+      on any archive RPC). Everything fails closed (a value that can't be
+      read is left unset, never guessed). Pure arithmetic is unit-tested
+      (23 tests); the RPC layer is tested on a live `anvil` with mock
+      contracts (9 tests: real historical `eth_call`s, ERC-20 and native
+      outflow, price move, fail-closed paths); and it runs on three real
+      exploits (below). **Not done:** governance voting-power sourcing
+      (`GovernanceProposalAnomaly` still has no baseline source);
+      non-Uniswap-V2 price oracles (Curve, Uniswap V3, Chainlink) — note
+      the Harvest Finance (Curve) exploit moved swap execution prices only
+      0.03-0.05%, so a price-deviation percentage cannot catch that class
+      and it needs a different signal; the `cast run` fallback is too slow
+      for a latency-critical path (use a trace-capable or local node).
+- [ ] **Slice 9 — Observability.** Structured logging exists (every
+      signature match, every decision, tracing spans in the daemon) but
+      metrics export and alerting hooks (SECURITY.md T3: the listener's
+      own liveness needs to be a first-class monitored signal) aren't
+      built yet.
+- [x] **Slice 10 — CI pipeline.** `.github/workflows/rust-ci.yml`
+      (fmt/clippy/build/test — the real-anvil integration tests run in
+      CI, not skipped), `foundry-ci.yml` (unit tests always; a separate
+      `replay` job gated behind a `RUN_REPLAY_TESTS` repo variable and an
+      `ETH_RPC_URL` secret, since it needs archive-RPC access CI doesn't
+      have by default), `codeql.yml` (Rust), `security-scans.yml`
+      (`cargo audit` + Slither, `fail-on: high`).
+- [x] **Slice 11 — Docs pass.** `SECURITY.md`, `docs/INTEGRATION.md`,
+      `README.md` written for a security-conscious protocol engineering
+      lead evaluating trust, not a portfolio-piece pitch — the README's
+      status table states the two real gaps (Slice 6/7 completeness,
+      Slice 8) as plainly as the parts that are done.
+- [x] **Guardian hardening.** `registerTarget` rejects non-contracts and
+      contracts without `paused()`; `script/DeployGuardian.sol` deploys with
+      role separation and re-verifies the resulting on-chain state (14 tests);
+      stateful invariant suite (mutation-checked); gas figures in
+      `docs/GAS.md`. Slither not run locally (not installed); CI runs it.
+
+## Open questions
+
+- **Archive RPC access:** Gideon needs to sign up for Alchemy (or
+  Infura/QuickNode) — not something this session could do on his
+  behalf. Blocks completing Slice 6/7 and running `foundry-ci.yml`'s
+  replay job in CI. Everything else is unblocked and already green.
+- **Confirm the remaining two historical exploits' exact transaction
+  hashes** (an oracle-manipulation case, a reentrancy case) against Etherscan directly before writing their replay tests —
+  do not reuse a web-search-summarized hash without independently
+  fetching and confirming it against the block explorer itself; this
+  session caught one real instance of a search-summary tool inventing a
+  plausible-but-wrong block number (14,895,611 instead of the actual
+  14,602,790 for the Beanstalk transaction) that only surfaced because
+  the actual Etherscan page was fetched directly afterward.
+- **GitHub remote:** not yet created. Propose
+  `github.com/gasthecreator/tripwire` (matching the other two portfolio
+  repos' naming pattern) once Gideon confirms public vs. private
+  visibility.
+- Wire Slice 6's replayed fork call-trace through the real `detection`
+  crate (see Slice 6 above) — this is the highest-value remaining piece
+  for the brief's core "prove detection would have fired" claim.
