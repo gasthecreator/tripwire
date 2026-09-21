@@ -252,6 +252,10 @@ radius is what makes "fast and automatic" an acceptable tradeoff against
 can do is pause the protocol (an availability hit, recoverable via
 timelock) — never drain it (a solvency hit, unrecoverable).
 
+Measured: `pause` costs roughly 25k–59k gas depending on the target, so gas is
+not what limits containment speed — detection and transaction inclusion are.
+Figures and caveats are in `docs/GAS.md`.
+
 ### 3.5 Guarded target contract
 
 `GuardedVault.sol` is a minimal demo lending/vault-style contract

@@ -228,4 +228,23 @@ contract GuardianTest is Test {
         timelock.execute(address(timelockGuardian), 0, unpauseCall, bytes32(0), bytes32(0));
         assertFalse(timelockVault.paused());
     }
+
+    function test_cannot_register_an_eoa() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Guardian.TargetNotContract.selector, stranger));
+        guardian.registerTarget(stranger);
+    }
+
+    function test_cannot_register_a_contract_that_is_not_pausable() public {
+        // The Guardian itself has code but no `paused()`.
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Guardian.TargetNotPausable.selector, address(guardian)));
+        guardian.registerTarget(address(guardian));
+    }
+
+    function test_cannot_register_the_zero_address() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Guardian.TargetNotContract.selector, address(0)));
+        guardian.registerTarget(address(0));
+    }
 }

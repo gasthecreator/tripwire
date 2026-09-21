@@ -140,6 +140,17 @@ unit tests in Slice 4 specifically target: non-pauser attempting to pause,
 attempting to call `pause()` on an unregistered target, reentrancy attempts
 into the guardian's own state during a pause call, and attempts to front-run
 a legitimate pause with a conflicting state change.
+
+Beyond example-based tests, `test/unit/invariant/GuardianInvariants.t.sol`
+runs a stateful fuzzer (128 runs x 64 calls, hostile and honest actors mixed)
+against an independent ghost model and asserts: only `PAUSER_ROLE` ever
+pauses; only admin ever unpauses or changes the registry; no role exists
+that an admin did not grant; an unregistered target is never paused; and the
+on-chain registry/paused state always equals the model. The suite was
+mutation-checked: letting the pauser unpause, and removing the pause role
+check, each make it fail. Deployment-time mistakes (EOA admin, hot wallet
+with governance roles, short timelock delay, non-pausable target) are covered
+by `Deploy.t.sol` against `script/DeployGuardian.sol`.
 **Residual risk:** this is a portfolio project, not an audited production
 deployment — see the disclaimer in `README.md`. No claim is made here that
 this contract is production-ready without an independent audit.

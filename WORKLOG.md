@@ -472,6 +472,10 @@ provider (Alchemy recommended) — not something this session can do on his
 behalf. Everything else can proceed without it.
 
 
+## Guardian hardening
+
+Added deploy-time safety (`registerTarget` checks, `DeployGuardian.sol` with post-condition verification), 14 deploy tests, 3 registerTarget tests, and a 7-invariant stateful fuzz suite. A first invariant version failed on my own handler bug (an admin legitimately granting a role to the 'attacker' actor); the invariant was corrected to 'every role holder was granted by an admin' rather than weakened. Mutation check: two deliberate Guardian bugs each caused a failure. Slither was not available locally, so it has not been run on this change. 37 Foundry tests pass.
+
 ## False-positive study: what it found, and the mistakes on the way
 
 The study did its job: it found that the detector would have paused 8 legitimate transactions out of 1,855. Two causes, both design flaws rather than tuning: (a) fund flow looked at one asset and never at what came back (fixed with value netting, prices from the block before the tx, only watched assets netted, fallback to the strict rule when a price is missing); (b) evidence is shared across signatures, so the lowest fund-flow threshold anywhere (5%, in reentrancy-basic) became the harm threshold everywhere (fixed by aligning at 15% with a guard test).
