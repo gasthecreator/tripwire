@@ -470,3 +470,8 @@ this entry.
 **Open, blocking Slices 2/6:** Gideon needs to sign up for an archive-RPC
 provider (Alchemy recommended) — not something this session can do on his
 behalf. Everything else can proceed without it.
+
+
+## Pause fee policy
+
+Found that `submit_pause` used provider-default fees and waited indefinitely: fine on a quiet chain, unsafe when the pause competes with an attacker's transactions. Added `SubmitPolicy` with fee escalation and same-nonce replacement. Two bugs found by the anvil tests rather than by reasoning: (1) replacements failed because gas estimation runs against pending state in which the first attempt has already paused the target, so the estimate reverted with `EnforcedPause`; fixed by reusing the first attempt's gas limit. (2) a revert at estimation burned every attempt timeout before returning; a failed first send now returns immediately. Untested: real mainnet congestion and private-mempool submission.

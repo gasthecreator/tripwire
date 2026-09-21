@@ -12,4 +12,5 @@ tracing.workspace = true
 alloy = { version = "1", features = ["full"] }
 
 [dev-dependencies]
+serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util", "process"] }
