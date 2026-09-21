@@ -102,6 +102,12 @@ necessarily alerting anyone that the automated layer is down.
 **Mitigation:** the listener's own liveness is a first-class metric
 (Slice 8): heartbeat/health-check exposed, alerting fires if the listener
 hasn't processed a new block within an expected window for the chain.
+**Implemented** (see `docs/OPERATIONS.md`): `/healthz`, Prometheus `/metrics`
+and `/status`; states for a stalled listener, repeated tick failures, a head
+that stops advancing (stale RPC), and a *failed pause*; an independent
+watchdog task that alerts (webhook + logs) even if the detection loop hangs;
+tick timeouts. Tested with unit tests, real sockets, and by killing the chain
+under a running daemon binary.
 "Tripwire is silently down" must never look identical to "Tripwire
 evaluated the last N blocks and found nothing."
 **Residual risk:** open. A determined, resourced adversary who can DoS

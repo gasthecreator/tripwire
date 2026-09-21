@@ -487,3 +487,8 @@ The final result was in-sample. The different-seed holdout (1,771 fresh transact
 ## Pause fee policy
 
 Found that `submit_pause` used provider-default fees and waited indefinitely: fine on a quiet chain, unsafe when the pause competes with an attacker's transactions. Added `SubmitPolicy` with fee escalation and same-nonce replacement. Two bugs found by the anvil tests rather than by reasoning: (1) replacements failed because gas estimation runs against pending state in which the first attempt has already paused the target, so the estimate reverted with `EnforcedPause`; fixed by reusing the first attempt's gas limit. (2) a revert at estimation burned every attempt timeout before returning; a failed first send now returns immediately. Untested: real mainnet congestion and private-mempool submission.
+
+
+## Liveness and metrics
+
+Built the T3 mitigation the docs had promised. Design choice worth recording: the watchdog is a separate task from the detection loop, because the failure it must catch (a tick hung on an RPC call) is exactly the one the loop cannot report about itself. Also added a per-tick timeout for the same reason. Smoke-tested the actual binary against anvil (healthy, then chain killed: 503 plus an ALERT log). Caught a stale-binary mistake during that test (cargo test does not rebuild the bin), so the first smoke run exercised old code; rerun after an explicit build. Known gap: nothing detects a plausible-but-false RPC.

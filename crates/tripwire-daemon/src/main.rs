@@ -8,8 +8,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chain_adapter::evm::EvmAdapter;
+use std::sync::Arc;
 use tripwire_context::{ContextConfig, EvmContext, TraceFallback};
 use tripwire_core::{Address, ChainId, Confidence};
+use tripwire_daemon::health::{
+    self, Alert, Health, HealthConfig, LogNotifier, Notifier, Severity, TickOutcome,
+    WebhookNotifier,
+};
 use tripwire_daemon::{Engine, EngineConfig};
 
 #[tokio::main]
@@ -104,6 +109,56 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new(adapter, guardian, context, signatures, cfg);
     tracing::info!(?poll_interval, "tripwire daemon started");
 
+    // --- liveness, metrics, alerting (SECURITY.md T3) ---------------------
+    let health = Arc::new(Health::new(
+        HealthConfig {
+            stale_after: Duration::from_secs(env_or("TRIPWIRE_STALE_AFTER_SECS", "30").parse()?),
+            chain_stall_after: Duration::from_secs(
+                env_or("TRIPWIRE_CHAIN_STALL_AFTER_SECS", "300").parse()?,
+            ),
+            max_consecutive_failures: env_or("TRIPWIRE_MAX_TICK_FAILURES", "5").parse()?,
+        },
+        health::unix_now(),
+    ));
+    let notifier: Arc<dyn Notifier> = match env_or("TRIPWIRE_ALERT_WEBHOOK_URL", "").as_str() {
+        "" => {
+            tracing::warn!(
+                "TRIPWIRE_ALERT_WEBHOOK_URL is unset: liveness alerts go to the logs only"
+            );
+            Arc::new(LogNotifier)
+        }
+        url => Arc::new(WebhookNotifier::new(url.to_string())),
+    };
+    let metrics_addr = env_or("TRIPWIRE_METRICS_ADDR", "127.0.0.1:9464");
+    if !metrics_addr.is_empty() {
+        let h = health.clone();
+        tokio::spawn(async move {
+            if let Err(e) = health::serve(&metrics_addr, h).await {
+                tracing::error!(error = %e, "health endpoint stopped");
+            }
+        });
+    }
+    // The watchdog runs in its own task on purpose: if a tick hangs, the main
+    // loop cannot report it, but this task still can.
+    {
+        let (h, n) = (health.clone(), notifier.clone());
+        let mut w = health::Watchdog::new(Duration::from_secs(
+            env_or("TRIPWIRE_ALERT_REMINDER_SECS", "600").parse()?,
+        ));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let now = health::unix_now();
+                if let Some(a) = w.observe(&h.status(now), now) {
+                    n.notify(&a).await;
+                }
+            }
+        });
+    }
+    // Longer than the worst-case pause submission (attempts x timeout), so a
+    // legitimately slow pause is not cancelled; a genuinely hung RPC call is.
+    let tick_timeout = Duration::from_secs(env_or("TRIPWIRE_TICK_TIMEOUT_SECS", "120").parse()?);
+
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     loop {
         tokio::select! {
@@ -116,12 +171,40 @@ async fn main() -> anyhow::Result<()> {
                 // crash the daemon: that would be strictly worse than the
                 // human-mediated status quo (SECURITY.md T3). Engine state is
                 // only advanced per fully-read block, so the retry is safe.
-                match engine.tick().await {
-                    Ok(r) if r.blocks_processed > 0 || !r.pauses.is_empty() || r.reorg_depth.is_some() => {
-                        tracing::info!(?r, "tick");
+                match tokio::time::timeout(tick_timeout, engine.tick()).await {
+                    Ok(Ok(r)) => {
+                        health.record_ok(health::unix_now(), &TickOutcome {
+                            head: r.head,
+                            blocks_processed: r.blocks_processed,
+                            pauses: r.pauses.len(),
+                            pause_errors: r.pause_errors,
+                            reorged: r.reorg_depth.is_some(),
+                        });
+                        for p in &r.pauses {
+                            notifier.notify(&Alert {
+                                severity: Severity::Critical,
+                                kind: "paused".into(),
+                                message: format!(
+                                    "PAUSED {target_contract}: pause tx {} for triggering tx {} ({} ms)",
+                                    p.pause_tx_hash, p.triggering_tx_hash, p.latency.as_millis()
+                                ),
+                                unix: health::unix_now(),
+                            }).await;
+                        }
+                        if r.blocks_processed > 0 || !r.pauses.is_empty() || r.reorg_depth.is_some() {
+                            tracing::info!(?r, "tick");
+                        } else {
+                            tracing::debug!(head = r.head, pending = r.pending, "tick");
+                        }
                     }
-                    Ok(r) => tracing::debug!(head = r.head, pending = r.pending, "tick"),
-                    Err(e) => tracing::error!(error = %e, "tick failed, will retry"),
+                    Ok(Err(e)) => {
+                        health.record_err(&e.to_string());
+                        tracing::error!(error = %e, "tick failed, will retry");
+                    }
+                    Err(_) => {
+                        health.record_timeout();
+                        tracing::error!(?tick_timeout, "tick timed out, will retry");
+                    }
                 }
             }
         }
