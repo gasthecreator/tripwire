@@ -587,7 +587,7 @@ Distribution of the largest single-asset outflow fraction over all sampled trans
 - Tracing is bounded (cap, time budget, failures). Untraced candidates could in principle have paused; per protocol:\n{trace_notes}
 - Native ETH outflows and non-Uniswap-V2 price movement are out of scope here.
 - Legitimate traffic is drawn from history that may contain a small number of exploit transactions; any \"would pause\" above should be read individually.
-- Three real exploits are detected by the same configuration (see `PLAN.md`); three is not a recall estimate.
+- Four real exploits (Beanstalk, Euler, Warp Finance, Rari/Fei Fuse) are detected by the same configuration (see `PLAN.md`); four is not a recall estimate.
 ",
         n_windows = n_windows, lo = lo, hi = hi, seed = seed, trace_cap = trace_cap,
         table = table,
