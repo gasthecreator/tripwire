@@ -482,4 +482,4 @@ The study did its job: it found that the detector would have paused 8 legitimate
 
 Mistakes worth keeping: I reported "0 would-pause" from a run in which 8 Aave candidates were never traced, and one of those was still a false pause. It was caught only because I rescored the eight known transactions directly instead of trusting the summary. The runner now traces every candidate, lists untraced ones per protocol, and prints a worst-case bound. Earlier still, rate limiting silently produced empty samples that read as "no outflows"; every RPC call now goes through a retrying proxy, and a run that loses data refuses to publish.
 
-The final result is in-sample. A different-seed holdout run is the check on that.
+The final result was in-sample. The different-seed holdout (1,771 fresh transactions, every candidate traced) also found 0 would-pause. That is what it can show: the fixes are not overfit to one sample. It cannot show the rate on other protocols or other eras.
