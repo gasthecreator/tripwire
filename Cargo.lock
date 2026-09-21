@@ -3454,6 +3454,8 @@ version = "0.1.0"
 dependencies = [
  "chain-adapter",
  "detection",
+ "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tripwire-core",
 ]
