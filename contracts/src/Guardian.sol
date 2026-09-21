@@ -17,8 +17,10 @@ import {IPausable} from "./interfaces/IPausable.sol";
 /// behind a multisig, never the hot wallet or any single EOA. Solidity
 /// can't enforce "this address is a timelock" as a type-level
 /// constraint, so that separation is a deployment-time responsibility —
-/// documented here, in `docs/INTEGRATION.md`, and checked by this
-/// repo's own deploy script, not something this contract can verify
+/// documented here, in `docs/INTEGRATION.md`, and enforced by this
+/// repo's deploy script (`script/DeployGuardian.sol`, which refuses an admin
+/// with no code and a hot wallet holding any governance role), not
+/// something this contract can verify
 /// about its own admin at construction time.
 contract Guardian is AccessControl {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -38,13 +40,28 @@ contract Guardian is AccessControl {
 
     error TargetNotRegistered(address target);
     error TargetAlreadyRegistered(address target);
+    /// The address has no code: an EOA or a contract not yet deployed. Every
+    /// future `pause` against it would revert, so it must not be registered.
+    error TargetNotContract(address target);
+    /// The contract doesn't answer `paused()`, so it doesn't implement
+    /// `IPausable` (wrong address, wrong contract) and could not be paused.
+    error TargetNotPausable(address target);
 
     constructor(address admin) {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
+    /// @notice Registers a target this Guardian may pause. Verifies the
+    /// address is a contract answering `paused()`: a misregistered target
+    /// would only be discovered at the worst possible moment, when a real
+    /// pause reverts during an exploit.
     function registerTarget(address target) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (registeredTargets[target]) revert TargetAlreadyRegistered(target);
+        if (target.code.length == 0) revert TargetNotContract(target);
+        try IPausable(target).paused() returns (bool) {}
+        catch {
+            revert TargetNotPausable(target);
+        }
         registeredTargets[target] = true;
         emit TargetRegistered(target);
     }
