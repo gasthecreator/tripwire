@@ -259,6 +259,7 @@ async fn main() {
     let protocols = discover(&provider).await;
 
     let mut incomplete = false;
+    let mut trace_notes: Vec<String> = Vec::new();
     let mut all_outcomes: Vec<Outcome> = Vec::new();
     let mut summaries = Vec::new();
     let mut paused_details: Vec<String> = Vec::new();
@@ -391,21 +392,49 @@ async fn main() {
             if capped { "capped, " } else { "" },
             cand.len().min(trace_cap)
         );
+        let budget = std::time::Duration::from_secs(env_u64("FP_TRACE_BUDGET_SECS", 1_200));
+        let started = std::time::Instant::now();
+        let (mut n_traced, mut n_failed, mut n_out_of_time) = (0usize, 0usize, 0usize);
         for &i in cand.iter().take(trace_cap) {
+            if started.elapsed() > budget {
+                n_out_of_time += 1;
+                continue;
+            }
             let s = &mut sampled[i];
-            match cast_trace::fetch_frames(&s.outcome.tx_hash, &rpc) {
+            // Retry: a transient failure (rate limit, dropped connection)
+            // should not leave a candidate untraced -- it could have been the
+            // one that pauses.
+            let mut traced = cast_trace::fetch_frames(&s.outcome.tx_hash, &rpc);
+            for _ in 0..2 {
+                if traced.is_ok() {
+                    break;
+                }
+                traced = cast_trace::fetch_frames(&s.outcome.tx_hash, &rpc);
+            }
+            match traced {
                 Ok(frames) => {
                     s.tx.call_frames = frames;
                     let d = evaluate(&sigs, &s.tx, &s.baseline, target);
                     s.outcome.traced = true;
+                    n_traced += 1;
                     s.outcome.confidence = d.confidence.value();
                     s.outcome.paused = d.should_pause();
                     s.outcome.evidence_keys =
                         d.counted_evidence.iter().map(|e| e.key.clone()).collect();
                 }
-                Err(e) => eprintln!("   trace failed for {}: {e}", s.outcome.tx_hash),
+                Err(e) => {
+                    // Counted and reported, not hidden: this candidate is
+                    // untraced and could in principle have paused.
+                    eprintln!("   trace failed for {}: {e}", s.outcome.tx_hash);
+                    n_failed += 1;
+                }
             }
         }
+        let beyond_cap = cand.len().saturating_sub(trace_cap);
+        trace_notes.push(format!(
+            "  - {}: {} candidates below the threshold with a fund-flow fact; {} traced; {} untraced ({} beyond the cap of {}, {} failed after retries, {} skipped after the {}s time budget).",
+            proto.name, cand.len(), n_traced, cand.len() - n_traced, beyond_cap, trace_cap, n_failed, n_out_of_time, budget.as_secs()
+        ));
         for s in sampled
             .iter()
             .filter(|s| s.outcome.traced || s.outcome.paused)
@@ -466,13 +495,14 @@ Distribution of the largest single-asset outflow fraction over all sampled trans
 
 - The sample is windows, not every block; the rate is an estimate with the interval shown. A zero count is an upper bound, not proof of zero.
 - Custody-contract configuration is one reasonable choice per protocol; a differently configured deployment will see different fractions.
-- Tracing was capped; if a protocol shows `capped` in the runner output, transactions below the cap were not traced and could in principle have paused.
+- Tracing is bounded (cap, time budget, failures). Untraced candidates could in principle have paused; per protocol:\n{trace_notes}
 - Native ETH outflows and non-Uniswap-V2 price movement are out of scope here.
 - Legitimate traffic is drawn from history that may contain a small number of exploit transactions; any \"would pause\" above should be read individually.
 - Three real exploits are detected by the same configuration (see `PLAN.md`); three is not a recall estimate.
 ",
         n_windows = n_windows, lo = lo, hi = hi, seed = seed, trace_cap = trace_cap,
         table = table,
+        trace_notes = trace_notes.join("\n"),
         b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4],
         paused = if paused_details.is_empty() { "None in the sample.".to_string() } else { paused_details.join("\n") },
         cands = if candidate_details.is_empty() { "None.".to_string() } else { candidate_details.join("\n") },
