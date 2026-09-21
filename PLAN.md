@@ -12,15 +12,17 @@ infrastructure: detection engine, chain adapter, guardian contracts, and
 the daemon wiring all pass, including a test that deploys the actual
 compiled contracts to a live `anvil` node and pauses them through the
 real Rust `guardian-client` code path. One historical exploit (Beanstalk,
-Apr 2022) is verified against Etherscan, replays against a real mainnet
-fork on the Solidity side, and — as of this update — has its real
-decoded call trace scored by the actual `detection` engine on the Rust
-side too (`crates/replay-harness`), using two independently-verified
-real function selectors. The gaps that matter most for anyone evaluating
-this beyond a portfolio context: (1) none of this replay/detection
-validation has actually *executed* against live data yet — it's real,
-compiling, tested-for-the-skip-path code blocked on an archive-RPC key;
-(2) three of four planned historical exploits still lack a verified
+Apr 2022) is verified against Etherscan and, as of 2026-09-21, its real
+transaction has been replayed live against a real mainnet fork on the
+Solidity side (`contracts/test/replay`, free-tier RPC, asserts real
+token outflow from the Beanstalk diamond). Scoring its real call trace
+through the actual `detection` engine (`crates/replay-harness`) is
+written but has NOT run live: the free-tier RPC key blocks the trace
+methods (`debug_traceTransaction`/`trace_transaction`) it needs. The
+gaps that matter most for anyone evaluating this beyond a portfolio
+context: (1) that Rust-side detection scoring on a real trace hasn't
+executed against live data yet — it needs a provider/plan with trace
+access; (2) three of four planned historical exploits still lack a verified
 tx hash; (3) the daemon's `Baseline` (the real chain-state context
 feeding fund-flow/oracle/governance conditions) is a placeholder — the
 scoring math is real and tested, but live sourcing for its inputs isn't
@@ -101,10 +103,17 @@ before merge, docs updated in the same PR as the code they describe.
       Beanstalk Farms (Apr 17, 2022) is verified — tx
       `0xcd314668aaa9bbfebaf1a0bd2b6553d01dd58899c508d4729fa7311dc5d33ad7`,
       block 14602790, confirmed directly against Etherscan on
-      2026-09-14 — and replays successfully against a real fork
-      (`contracts/test/replay/HistoricalExploits.t.sol`) by fetching the
-      real transaction live via `vm.rpc`/`eth_getTransactionByHash`
-      rather than hardcoding calldata. The other three signature-
+      2026-09-14 — and, verified live 2026-09-21, replays against a real
+      mainnet fork (`contracts/test/replay/HistoricalExploits.t.sol`).
+      That transaction is a **contract creation** (`to` is null; the
+      exploit ran in a constructor), so the test uses Foundry's
+      transaction-aware fork (`createSelectFork(url, txHash)` +
+      `vm.transact`), which applies earlier same-block transactions and
+      preserves creation semantics; it asserts real ERC-20 outflows from
+      the Beanstalk diamond (4 observed), not merely a non-revert. An
+      earlier `vm.rpc`-based version of this test could never have
+      worked (wrong return format, and no handling of a null `to`); it
+      only looked fine because it had never run against a real RPC. The other three signature-
       diversity slots (flash-loan/fund-flow — candidate Euler Finance
       Mar 2023; oracle manipulation — candidate Cream Finance Oct 2021
       or Mango Markets Oct 2022; reentrancy — candidate dForce Feb 2020
@@ -125,10 +134,18 @@ before merge, docs updated in the same PR as the code they describe.
       standard flash-loan callback (`0x920f5c84`, a fixed public
       interface, not incident-specific). The test asserts both
       selectors are actually present in the real trace and that the
-      resulting confidence crosses threshold. **Still blocked on the
-      archive-RPC key to actually execute** — the code compiles and its
-      no-RPC skip path is verified, but it hasn't run against live data
-      in this session; `rust-ci.yml`'s `replay` job runs it in CI once
+      resulting confidence crosses threshold. **Still blocked — not run
+      live:** the Alchemy free tier rejects both `debug_traceTransaction`
+      and `trace_transaction`, so the adapter gets an empty trace and the
+      test fails its non-empty-trace guard (confirmed 2026-09-21).
+      Anvil forks proxy historical-transaction traces to the same
+      upstream, so a fork doesn't help. A local re-execution of the
+      transaction (fork at block N-1, impersonate the sender, resend the
+      calldata) did produce a 170-frame trace containing both selectors,
+      but it reverted (`LibDiamondCut: _init address has no code`), so it
+      is not a faithful trace and is deliberately not used as a fixture.
+      Unblocking needs a provider/plan with trace access;
+      `rust-ci.yml`'s `replay` job runs it in CI once
       `ETH_RPC_URL`/`RUN_REPLAY_TESTS` are configured.
 - [ ] **Slice 7 — False-positive validation.** Not started at the
       historical-replay level (same archive-RPC dependency as Slice 6's

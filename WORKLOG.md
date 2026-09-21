@@ -24,6 +24,37 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] First live RPC run: fix the Beanstalk fork test, learn the free-tier limit
+
+**Author:** Claude Code
+
+**What:** With an Alchemy free-tier archive key (passed via env var only,
+never written to a file), ran the replay tests live for the first time.
+Findings: (1) the Solidity Beanstalk test, which had only ever been
+compile- and skip-path-checked, could not have worked — `vm.rpc`
+returns ABI-decoded data rather than a JSON string, and the target
+transaction has `to == null` (it is a contract creation whose constructor
+ran the whole exploit). Rewrote it to use Foundry's transaction-aware
+fork (`createSelectFork(url, txHash)` + `vm.transact`), which applies
+earlier same-block transactions and preserves creation semantics, and to
+assert observable effect: 4 ERC-20 transfers out of the Beanstalk
+diamond across 121 logs. (2) The Rust `replay-harness` test still can't
+run live: the free tier rejects `debug_traceTransaction` and
+`trace_transaction`, and anvil forks proxy historical-tx traces
+upstream. A local re-execution (fork at N-1, impersonate, resend
+calldata) produced a 170-frame trace with both selectors but reverted
+(`LibDiamondCut: _init address has no code`), so it is not faithful and
+was not adopted as a fixture.
+
+**Why:** A test that has never run against the real thing is a claim, not
+evidence — the earlier version looked finished and was not.
+
+**Verified:** Live: `FOUNDRY_PROFILE=replay forge test` passes (Beanstalk
+replay real; three placeholders still skip). No-key skip path, `forge fmt
+--check`, and the 19 unit tests unchanged and green.
+
+---
+
 ## [2026-09-14] Fix a real CI-only build-order bug (sol! macro needs contracts built first)
 
 **Author:** Claude Code
