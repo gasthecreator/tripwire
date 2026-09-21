@@ -342,3 +342,8 @@ this entry.
 **Open, blocking Slices 2/6:** Gideon needs to sign up for an archive-RPC
 provider (Alchemy recommended) — not something this session can do on his
 behalf. Everything else can proceed without it.
+
+
+## Guardian hardening
+
+Added deploy-time safety (`registerTarget` checks, `DeployGuardian.sol` with post-condition verification), 14 deploy tests, 3 registerTarget tests, and a 7-invariant stateful fuzz suite. A first invariant version failed on my own handler bug (an admin legitimately granting a role to the 'attacker' actor); the invariant was corrected to 'every role holder was granted by an admin' rather than weakened. Mutation check: two deliberate Guardian bugs each caused a failure. Slither was not available locally, so it has not been run on this change. 37 Foundry tests pass.

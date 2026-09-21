@@ -196,6 +196,11 @@ before merge, docs updated in the same PR as the code they describe.
       lead evaluating trust, not a portfolio-piece pitch — the README's
       status table states the two real gaps (Slice 6/7 completeness,
       Slice 8) as plainly as the parts that are done.
+- [x] **Guardian hardening.** `registerTarget` rejects non-contracts and
+      contracts without `paused()`; `script/DeployGuardian.sol` deploys with
+      role separation and re-verifies the resulting on-chain state (14 tests);
+      stateful invariant suite (mutation-checked); gas figures in
+      `docs/GAS.md`. Slither not run locally (not installed); CI runs it.
 
 ## Open questions
 
