@@ -96,7 +96,7 @@ pub fn evaluate(
 mod tests {
     use super::*;
     use std::str::FromStr;
-    use tripwire_core::{CallFrame, Condition, ConditionKind, SignatureCategory};
+    use tripwire_core::{CallFrame, CallKind, Condition, ConditionKind, SignatureCategory};
 
     fn reentrancy_signature(weight: f64) -> Signature {
         Signature {
@@ -145,6 +145,7 @@ mod tests {
                     to: Address::from_str(VAULT).unwrap(),
                     selector: Some("0xwithdraw".into()),
                     value_wei: 0,
+                    kind: CallKind::Call,
                 },
                 CallFrame {
                     depth: 1,
@@ -152,6 +153,7 @@ mod tests {
                     to: Address::from_str(VAULT).unwrap(),
                     selector: Some("0xwithdraw".into()),
                     value_wei: 0,
+                    kind: CallKind::Call,
                 },
             ],
             timestamp_unix: 1000,
@@ -174,6 +176,7 @@ mod tests {
                 to: Address::from_str(VAULT).unwrap(),
                 selector: Some("0xdeposit".into()),
                 value_wei: 0,
+                kind: CallKind::Call,
             }],
             timestamp_unix: 1000,
         }

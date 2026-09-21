@@ -23,12 +23,13 @@ threshold. That signature was tuned to this incident, so it validates
 the pipeline, not generic detection: the shipped generic signatures
 score 65.0 on the same trace, below threshold. The gaps that matter
 most for anyone evaluating this beyond a portfolio context: (1) generic
-detection quality on real traces — the `reentrancy-basic` condition
-fired on this exploit for the wrong reason (36 "recurring" (target,
-selector) pairs, mostly read-only STATICCALLs such as `balanceOf`;
-`CallFrame` doesn't record call kind, so the detector can't exclude
-them) — a concrete false-positive weakness found only via real data;
-(2) three of four planned historical exploits still lack a verified
+detection has still only been checked against one real trace — scoring
+it exposed a real false positive (the `reentrancy-basic` condition
+matched 36 times: read-only STATICCALLs such as `balanceOf`, and calls
+that had already returned), now fixed by recording `CallKind` on frames
+and requiring a state-changing re-entry into an *active ancestor*;
+one legitimate match remains (nested `uniswapV2Call` flash-swap
+callbacks) and stays below threshold by design; (2) three of four planned historical exploits still lack a verified
 tx hash; (3) the daemon's `Baseline` (the real chain-state context
 feeding fund-flow/oracle/governance conditions) is a placeholder — the
 scoring math is real and tested, but live sourcing for its inputs isn't

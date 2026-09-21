@@ -12,7 +12,7 @@ use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
-use tripwire_core::{Address as CoreAddress, CallFrame, ChainId, LogEvent, TxEvent};
+use tripwire_core::{Address as CoreAddress, CallFrame, CallKind, ChainId, LogEvent, TxEvent};
 
 use crate::{ChainAdapter, ChainAdapterError};
 
@@ -121,6 +121,9 @@ fn is_method_not_found(err: &str) -> bool {
 /// archive.
 #[derive(Debug, Deserialize)]
 struct RawCallFrame {
+    /// geth callTracer's call variant: CALL, STATICCALL, DELEGATECALL, ...
+    #[serde(rename = "type", default)]
+    call_type: Option<String>,
     from: String,
     to: Option<String>,
     input: Option<String>,
@@ -136,16 +139,23 @@ fn flatten_call_frame(raw: &RawCallFrame, depth: u32, out: &mut Vec<CallFrame>) 
         .and_then(|s| CoreAddress::from_str(s).ok())
         .unwrap_or(CoreAddress::ZERO);
     let from = CoreAddress::from_str(&raw.from).unwrap_or(CoreAddress::ZERO);
-    let selector = raw
-        .input
-        .as_deref()
-        .filter(|s| s.len() >= 10)
-        .map(|s| s[0..10].to_string());
     let value_wei = raw
         .value
         .as_deref()
         .and_then(|v| u128::from_str_radix(v.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
+
+    let kind = raw
+        .call_type
+        .as_deref()
+        .map(CallKind::parse)
+        .unwrap_or_default();
+    // CREATE frames carry initcode, whose first 4 bytes aren't a selector.
+    let selector = raw
+        .input
+        .as_deref()
+        .filter(|s| kind.is_message_call() && s.len() >= 10)
+        .map(|s| s[0..10].to_ascii_lowercase());
 
     out.push(CallFrame {
         depth,
@@ -153,6 +163,7 @@ fn flatten_call_frame(raw: &RawCallFrame, depth: u32, out: &mut Vec<CallFrame>) 
         to,
         selector,
         value_wei,
+        kind,
     });
 
     for child in &raw.calls {
@@ -266,6 +277,7 @@ mod tests {
     #[test]
     fn flattens_nested_call_frames_with_correct_depth() {
         let raw = RawCallFrame {
+            call_type: Some("CALL".into()),
             from: "0x0000000000000000000000000000000000000001".into(),
             to: Some("0x0000000000000000000000000000000000000002".into()),
             input: Some(
@@ -273,6 +285,7 @@ mod tests {
             ),
             value: Some("0x0".into()),
             calls: vec![RawCallFrame {
+                call_type: Some("STATICCALL".into()),
                 from: "0x0000000000000000000000000000000000000002".into(),
                 to: Some("0x0000000000000000000000000000000000000003".into()),
                 input: None,
@@ -288,6 +301,8 @@ mod tests {
         assert_eq!(out[1].depth, 1);
         assert_eq!(out[1].selector, None);
         assert_eq!(out[1].value_wei, 1);
+        assert_eq!(out[0].kind, CallKind::Call);
+        assert_eq!(out[1].kind, CallKind::StaticCall);
     }
 
     #[test]
@@ -297,5 +312,30 @@ mod tests {
             "the method debug_traceTransaction does not exist/is not available"
         ));
         assert!(!is_method_not_found("invalid params: bad tx hash"));
+    }
+
+    #[test]
+    fn create_frames_get_no_selector_and_missing_type_defaults_to_call() {
+        let create = RawCallFrame {
+            call_type: Some("CREATE".into()),
+            from: "0x0000000000000000000000000000000000000001".into(),
+            to: None,
+            input: Some("0x6080604052348015".into()),
+            value: None,
+            calls: vec![RawCallFrame {
+                call_type: None,
+                from: "0x0000000000000000000000000000000000000002".into(),
+                to: Some("0x0000000000000000000000000000000000000003".into()),
+                input: Some("0xa9059cbb00".into()),
+                value: None,
+                calls: vec![],
+            }],
+        };
+        let mut out = Vec::new();
+        flatten_call_frame(&create, 0, &mut out);
+        assert_eq!(out[0].kind, CallKind::Create);
+        assert_eq!(out[0].selector, None);
+        assert_eq!(out[1].kind, CallKind::Call);
+        assert_eq!(out[1].selector.as_deref(), Some("0xa9059cbb"));
     }
 }
