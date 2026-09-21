@@ -10,7 +10,9 @@ use tripwire_core::{CallFrame, ConditionKind, TxEvent};
 pub struct Baseline {
     /// The watched contract's balance (wei) at the start of the
     /// signature's evaluation window — the denominator for
-    /// `FundFlowDelta`.
+    /// `FundFlowDelta`. When the context source values assets it is in the
+    /// valuer's common *value unit* rather than raw token units; only the
+    /// ratio to `outflow_wei` is ever used.
     pub balance_baseline_wei: u128,
     /// Net value that left the watched contract during this transaction,
     /// as computed upstream from the raw call trace.

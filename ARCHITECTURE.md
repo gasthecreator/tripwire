@@ -202,6 +202,30 @@ selector sequence. The decision records the counted evidence and which
 signature/condition supplied each weight, so a pause or near miss is
 diagnosable.
 
+**Fund flow is measured as value lost, not one asset at a time.** The
+false-positive study (`docs/FALSE_POSITIVES.md`) found legitimate
+transactions paused because the per-asset rule saw only half of a trade:
+a Curve swap sends USDC out and takes USDT in; a borrow against freshly
+deposited collateral sends LUSD out and takes USDC in. With a `TokenValuer`
+configured, `tripwire-context` nets every watched asset's movement at
+pre-transaction prices — `max(0, Σ net_out × value)` over the value of the
+assets that lost — so a fair trade nets to ~0 and a drain of one asset with
+nothing coming back is unchanged. Three deliberate constraints keep this from
+becoming an evasion route: prices are read at the block *before* the
+transaction (a price manipulated inside it cannot inflate what an attacker
+deposits); only the protocol's watched custody assets are netted (depositing
+something the protocol does not custody cancels nothing); and if any moved
+asset has no value the transaction falls back to the strict per-asset rule.
+The residual risk is a price already manipulated in an earlier block.
+
+**Cross-contract re-entry.** `ReentrancyDepth` only sees a function
+re-entering itself. `ProtocolCallbackReentry` covers the shape of the
+Rari/Fei Fuse exploit (a market sends ETH to the borrower, whose `receive()`
+calls the Comptroller before the borrow is booked): a call out of the
+protocol that calls back into any protocol contract before the first call
+returns. It needs the protocol's contract set (`TRIPWIRE_PROTOCOL_CONTRACTS`)
+and is inert without it. It is supporting evidence only.
+
 ### 3.4 Guardian Contract
 
 `Guardian.sol` holds `PAUSER_ROLE` (OpenZeppelin `AccessControl`) granted
@@ -227,6 +251,10 @@ radius is what makes "fast and automatic" an acceptable tradeoff against
 "slow and human-gated": the worst a compromised or malfunctioning hot key
 can do is pause the protocol (an availability hit, recoverable via
 timelock) — never drain it (a solvency hit, unrecoverable).
+
+Measured: `pause` costs roughly 25k–59k gas depending on the target, so gas is
+not what limits containment speed — detection and transaction inclusion are.
+Figures and caveats are in `docs/GAS.md`.
 
 ### 3.5 Guarded target contract
 

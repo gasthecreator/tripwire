@@ -117,4 +117,39 @@ async fn warp_finance_exploit_is_caught_by_the_shipped_generic_signatures() {
         "price movement alone scored {}",
         p.confidence.value()
     );
+
+    // Value netting must not blind the detector to this attack: the same
+    // exploit, with the vaults' DAI and USDC valued at $1, still loses most
+    // of the value it was custodying. (Only the watched custody assets are
+    // netted; the LP token the attacker deposited is not one of them, and
+    // prices are read at the block *before* the transaction.)
+    let mut cfg = ContextConfig::new(WARP_USDC_VAULT.parse().unwrap());
+    cfg.holders = vec![
+        WARP_USDC_VAULT.parse().unwrap(),
+        WARP_DAI_VAULT.parse().unwrap(),
+    ];
+    cfg.watched_tokens = vec![DAI.parse().unwrap(), USDC.parse().unwrap()];
+    cfg.valuer = Some(std::sync::Arc::new(
+        tripwire_context::FixedValues::new()
+            .with_stable(DAI.parse().unwrap(), 18)
+            .with_stable(USDC.parse().unwrap(), 6),
+    ));
+    let netted = EvmContext::connect(&rpc_url, cfg).expect("context");
+    let nb = netted.baseline(&tx).await;
+    let lost = nb.outflow_wei as f64 / nb.balance_baseline_wei as f64;
+    println!(
+        "value-netted loss: {:.1}% of the drained assets' value",
+        lost * 100.0
+    );
+    let nd = detection::evaluate(
+        &support::shipped_signatures(),
+        ChainId::ETHEREUM_MAINNET,
+        WARP_USDC_VAULT.parse::<Address>().unwrap(),
+        &tx,
+        &nb,
+        Confidence::new(80.0),
+        tx.timestamp_unix,
+    );
+    assert!(lost > 0.5, "netted loss was {lost}");
+    assert!(nd.should_pause(), "netted: {}", nd.confidence.value());
 }

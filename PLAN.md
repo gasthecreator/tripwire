@@ -189,16 +189,29 @@ before merge, docs updated in the same PR as the code they describe.
       had produced a reverted, unfaithful trace — same-block state
       matters. `rust-ci.yml`'s `replay` job runs it in CI once
       `ETH_RPC_URL`/`RUN_REPLAY_TESTS` are configured.
-- [ ] **Slice 7 — False-positive validation.** Not started at the
-      historical-replay level (same archive-RPC dependency as Slice 6's
-      remaining work). Interim signal exists in `detection`'s own unit
-      tests (`small_legitimate_withdrawal_does_not_fire_high_threshold`,
-      `oracle_deviation_does_not_fire_on_normal_market_move`,
-      `nested_legitimate_calls_do_not_look_like_reentrancy`,
-      `governance_anomaly_does_not_fire_on_normal_delegation`,
-      `benign_transaction_produces_zero_confidence`) but these are
-      synthetic fixtures, not real historical high-volume traffic —
-      don't conflate the two when citing a false-positive rate.
+- [x] **Slice 7 — False-positive validation (done, with caveats).**
+      `replay-harness` `fp_study`: seeded random 10-block windows from
+      blocks 17.0M-20.5M, every ERC-20 outflow from Aave V2 (734 txs),
+      Compound V2 (177) and Curve 3pool (944) scored by the production
+      context and the shipped signatures; candidates with a fund-flow fact are
+      traced with `cast run`. **It found two real detector flaws**: the
+      first complete run would have paused **8 legitimate transactions**
+      (value-neutral swaps, a borrow against fresh collateral, flash-loan
+      refinancing), caused by (a) measuring one asset's outflow without the
+      value coming back and (b) the lowest fund-flow threshold in the set
+      (5%) acting as the harm threshold for every signature. Fixed by
+      value-netted fund flow and aligned 15% thresholds (guard test). Final
+      run: **0 would-pause, every candidate traced**; 95% upper bound about
+      1 false pause/day per protocol (`docs/FALSE_POSITIVES.md`).
+      **Caveats:** that run is *in-sample* (fixes were made after seeing those
+      transactions). A different-seed holdout
+      (`docs/FALSE_POSITIVES_HOLDOUT.md`, 1,771 fresh transactions, all
+      candidates traced) also found 0 would-pause, which guards against
+      overfitting to the sample but not against other protocols or eras. Native-ETH and non-V2 price movement
+      are out of scope; three protocols are not "DeFi"; and 0 of ~1,900
+      is a bound, not a proof. An intermediate run wrongly reported 0 pauses
+      with 8 candidates untraced; the runner now reports untraced candidates
+      and a worst-case bound.
 - [x] **Slice 8 — Real baseline sourcing (mostly).** New
       `tripwire-context` crate, wired into the daemon
       (`TRIPWIRE_WATCHED_TOKENS`, `TRIPWIRE_EXTRA_HOLDERS`,
@@ -240,6 +253,12 @@ before merge, docs updated in the same PR as the code they describe.
       lead evaluating trust, not a portfolio-piece pitch — the README's
       status table states the two real gaps (Slice 6/7 completeness,
       Slice 8) as plainly as the parts that are done.
+- [x] **Guardian hardening.** `registerTarget` rejects non-contracts and
+      contracts without `paused()`; `script/DeployGuardian.sol` deploys with
+      role separation and re-verifies the resulting on-chain state (14 tests);
+      stateful invariant suite (mutation-checked); gas figures in
+      `docs/GAS.md`. Slither not run locally (not installed); CI runs it.
+
 - [x] **Pause fee policy (inclusion latency).** `guardian-client` no longer
       sends one default-fee transaction and waits forever. `SubmitPolicy`
       overpays the priority fee (default 2x the estimate, 2 gwei floor), waits
