@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 tripwire-core.workspace = true
+chain-adapter.workspace = true
+detection.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-chain-adapter.workspace = true
-detection.workspace = true
 tokio.workspace = true

@@ -24,6 +24,40 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] Second real exploit: Euler Finance (found on-chain), and a scoring flaw it exposed
+
+**Author:** Claude Code
+
+**What:** Found Euler's first attack transaction on-chain instead of via
+web summaries: free-tier `eth_getLogs` is capped at 10 blocks, so scanned
+Aave V2 `FlashLoan` events in 10-block windows around 13 Mar 2023 for a
+30,000,000 DAI loan -> tx `0xc310a0af…b111d`, block 16817996. Confirmed
+on Etherscan (sender "Euler Finance Exploiter 3", recipient "Euler
+Exploit Contract 1", success). My first anchor (Euler's `Liquidation`
+event on the main proxy) returned nothing — Euler emits via per-market
+proxies — so anchors need checking too. Added
+`replay_harness::support` (skip logic, real-tx loader, ERC-20 net-outflow
+from receipt logs, historical balance via `cast call`, fund-flow
+`Baseline`; 7 unit tests) and `tests/euler_flash_loan_drain.rs`; replaced
+the Solidity Euler placeholder with a live replay.
+
+**Verified live:** real trace 151 frames (depth 11); Euler DAI balance
+8,904,507 -> 0 (net of the repaid 30M flash loan); incident-tuned
+signature (Aave callback + `donateToReserves` `0x36f022aa`, computed from
+Euler's own EToken.sol, + 50% balance drain) scores 95.0 vs 80.0;
+Solidity replay asserts the same drain.
+
+**Flaw found:** the shipped generic signatures score 100.0 on Euler, but
+all three matches (`flash-loan-drain` 60, `oracle-manipulation` 40,
+`reentrancy-basic` 30) come from the same single outflow fact, summed
+three times. Any legitimate withdrawal above ~20% of a balance would
+also pause. This contradicts the corroboration rule in ARCHITECTURE.md
+§3.3 / SECURITY.md T2, and no synthetic test caught it. Recorded in
+PLAN.md and README.md; the test prints (does not assert) the generic
+result so the flaw isn't enshrined. Fix is next, as its own PR.
+
+---
+
 ## [2026-09-21] Fix the reentrancy false positive found on the real Beanstalk trace
 
 **Author:** Claude Code
