@@ -4,6 +4,7 @@
 
 pub mod engine;
 mod guardian_pauser;
+pub mod health;
 
 pub use engine::{
     touches_any, touches_target, ContextSource, Engine, EngineConfig, EngineError, NoContext,

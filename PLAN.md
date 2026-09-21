@@ -251,6 +251,15 @@ before merge, docs updated in the same PR as the code they describe.
       Configurable via `TRIPWIRE_PAUSE_*`. **Not tested:** behaviour on a real
       congested mainnet or against private-mempool/builder submission
       (Flashbots-style), which is the next step for real contested blocks.
+- [x] **Slice 8 — Liveness, metrics, alerting.** `tripwire_daemon::health`:
+      health states (never ticked / stalled / failing / chain not advancing /
+      pause failing), Prometheus + JSON + `/healthz` endpoint, a watchdog
+      task independent of the detection loop that alerts on transitions,
+      reason changes and reminders, webhook + log notifier, per-tick timeout.
+      Verified on the real binary: killing the chain flips `/healthz` to 503
+      and logs an ALERT. **Not done:** multi-provider RPC cross-checking (an
+      RPC serving a plausible but false chain is undetected), and no
+      external "dead man's switch" service; see `docs/OPERATIONS.md`.
 
 ## Open questions
 
