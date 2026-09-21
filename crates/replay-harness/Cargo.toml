@@ -8,6 +8,7 @@ license.workspace = true
 tripwire-core.workspace = true
 chain-adapter.workspace = true
 detection.workspace = true
+tripwire-context.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

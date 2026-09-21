@@ -1753,6 +1753,7 @@ dependencies = [
 name = "detection"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_yaml",
  "thiserror 1.0.69",
@@ -3457,6 +3458,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tripwire-context",
  "tripwire-core",
 ]
 
@@ -4521,6 +4523,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tripwire-context"
+version = "0.1.0"
+dependencies = [
+ "alloy",
+ "async-trait",
+ "chain-adapter",
+ "detection",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tripwire-core",
+]
+
+[[package]]
 name = "tripwire-core"
 version = "0.1.0"
 dependencies = [
@@ -4545,6 +4562,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tripwire-context",
  "tripwire-core",
 ]
 

@@ -7,9 +7,11 @@
 //! false-positive control surface.
 
 pub mod conditions;
+pub mod context;
 pub mod engine;
 pub mod loader;
 
 pub use conditions::Baseline;
+pub use context::{ContextSource, NoContext};
 pub use engine::{evaluate, evaluate_signatures, score};
 pub use loader::{load_signatures_from_dir, LoaderError};

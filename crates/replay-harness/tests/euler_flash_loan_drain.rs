@@ -24,9 +24,11 @@
 //! The signature is tuned to this incident (its selectors come from it),
 //! so passing shows the pipeline works on real data, not that a generic
 //! signature would have caught Euler; the shipped generic signatures are
-//! scored on the same real data below to keep that visible.
+//! scored on the same real data below, and they do pause on it.
 
+use detection::ContextSource;
 use replay_harness::support;
+use tripwire_context::{ContextConfig, EvmContext};
 use tripwire_core::{
     Address, ChainId, Condition, ConditionKind, Confidence, Signature, SignatureCategory,
 };
@@ -35,7 +37,12 @@ const BLOCK: u64 = 16_817_996;
 const TX_HASH: &str = "0xc310a0affe2169d1f6feec1c63dbc7f7c62a887fa48795d327d4d2da2d6b111d";
 const EXPLOIT_CONTRACT: &str = "0xeBC29199C817Dc47BA12E3F86102564D640CBf99";
 const EULER: &str = "0x27182842E098f60e3D576794A5bFFb0777E025d3";
-const DAI: &str = "0x6b175474e89094c44da98b954eedeac495271d0f";
+const DAI: &str = "0x6B175474E89094C44Da98b954EedeAC495271d0F";
+const USDC: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const USDT: &str = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+const WETH: &str = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const WBTC: &str = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599";
+const WSTETH: &str = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0";
 const AAVE_V2_FLASH_LOAN_CALLBACK: &str = "0x920f5c84";
 const DONATE_TO_RESERVES: &str = "0x36f022aa";
 
@@ -96,12 +103,20 @@ async fn euler_exploit_scores_above_pause_threshold() {
         "the real exploit is a wide call tree"
     );
 
-    // Real fund flow: Euler's DAI balance in the block before, and the
-    // net DAI that left it during the transaction (the 30M flash loan is
-    // borrowed and repaid, so only the real drain remains).
-    let baseline = support::fund_flow_baseline(&rpc_url, &tx, DAI, EULER).expect("baseline");
+    // Real fund flow, from the production context source: Euler's balances
+    // in the block before, and the net outflow of each watched asset during
+    // the transaction (the 30M flash loan is borrowed and repaid, so only
+    // the real drain remains). The watched assets are Euler's own markets,
+    // configured up front as an operator would — not derived from this tx.
+    let mut cfg = ContextConfig::new(EULER.parse().unwrap());
+    cfg.watched_tokens = [DAI, USDC, USDT, WETH, WBTC, WSTETH]
+        .iter()
+        .map(|a| a.parse().unwrap())
+        .collect();
+    let ctx = EvmContext::connect(&rpc_url, cfg).expect("context");
+    let baseline = ctx.baseline(&tx).await;
     println!(
-        "Euler DAI before: {} wei, net outflow: {} wei",
+        "Euler worst-asset balance: {} wei, net outflow: {} wei",
         baseline.balance_baseline_wei, baseline.outflow_wei
     );
     assert_eq!(
@@ -136,22 +151,11 @@ async fn euler_exploit_scores_above_pause_threshold() {
     );
     assert!(decision.should_pause());
 
-    // Shipped generic signatures on the same real data. Their placeholder
-    // flash-loan and governance selectors don't match Euler, so the only
-    // evidence they see is the balance drain, which three signatures each
-    // report. Deduplicated, that is one fact worth at most 60 — below the
-    // pause threshold: the generic set alone does NOT catch Euler, and,
-    // crucially, would not pause on any lone large outflow either. (Before
-    // evidence deduplication this scored 100.0 by summing the same outflow
-    // three times; see WORKLOG.md.) Catching Euler with generic signatures
-    // needs per-protocol tuning or a corroborating condition, as with
-    // Beanstalk.
-    let generic = detection::load_signatures_from_dir(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../signatures"),
-    )
-    .expect("load shipped signatures");
+    // The shipped generic signatures, with only Euler's own assets
+    // configured: a call to Aave's flash-loan entrypoint plus a 100% drain
+    // of an asset Euler held. Two distinct facts, one of them harm.
     let g = detection::evaluate(
-        &generic,
+        &support::shipped_signatures(),
         ChainId::ETHEREUM_MAINNET,
         target,
         &tx,
@@ -160,16 +164,36 @@ async fn euler_exploit_scores_above_pause_threshold() {
         tx.timestamp_unix,
     );
     println!(
-        "Shipped generic signatures on the same real data: confidence {:.1}, counted evidence {:?}",
+        "GENERIC: confidence {:.1} pause={} evidence {:?}",
         g.confidence.value(),
+        g.should_pause(),
         g.counted_evidence
     );
+    let keys: Vec<&str> = g.counted_evidence.iter().map(|e| e.key.as_str()).collect();
+    assert!(keys.contains(&"fund_flow"), "{keys:?}");
+    assert!(keys.iter().any(|k| k.starts_with("call_any:")), "{keys:?}");
     assert!(
-        g.matches.len() >= 2,
-        "several generic signatures see the drain"
+        g.should_pause(),
+        "generic set scored only {}",
+        g.confidence.value()
     );
-    assert_eq!(g.counted_evidence.len(), 1, "but it is one fact");
-    assert_eq!(g.counted_evidence[0].key, "fund_flow");
-    assert_eq!(g.confidence.value(), 60.0);
-    assert!(!g.should_pause());
+
+    // And the drain alone -- one fact -- must not pause (the double-counting
+    // bug once made it score 100).
+    let mut drain_only = tx.clone();
+    drain_only.call_frames.clear();
+    let d = detection::evaluate(
+        &support::shipped_signatures(),
+        ChainId::ETHEREUM_MAINNET,
+        target,
+        &drain_only,
+        &baseline,
+        threshold,
+        tx.timestamp_unix,
+    );
+    assert!(
+        !d.should_pause(),
+        "a lone drain scored {}",
+        d.confidence.value()
+    );
 }

@@ -21,7 +21,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use chain_adapter::{ChainAdapter, ChainAdapterError};
-use detection::Baseline;
 use thiserror::Error;
 use tripwire_core::{Address, BlockHeader, ChainId, Confidence, PauseDecision, Signature, TxEvent};
 
@@ -44,40 +43,17 @@ pub trait Pauser: Send + Sync {
     async fn submit_pause(&self, decision: &PauseDecision) -> Result<String, PauseError>;
 }
 
-/// Supplies per-transaction context the raw chain view lacks.
-///
-/// `enrich` fills fields the adapter couldn't (chiefly the call trace when
-/// the node doesn't serve `debug_traceTransaction`); `baseline` supplies the
-/// balance/price/voting-power context the fund-flow, oracle and governance
-/// conditions compare against.
-#[async_trait]
-pub trait ContextSource: Send + Sync {
-    async fn enrich(&self, tx: &mut TxEvent);
-    async fn baseline(&self, tx: &TxEvent) -> Baseline;
-}
-
-/// Alias kept for readability where only the baseline half matters.
-pub use ContextSource as BaselineSource;
-
-/// No extra context: transactions are evaluated as the adapter returned
-/// them, against an empty baseline. Call-pattern and reentrancy conditions
-/// still work when the adapter supplies traces; fund-flow, oracle and
-/// governance conditions fail closed (never satisfied).
-pub struct NoContext;
-
-#[async_trait]
-impl ContextSource for NoContext {
-    async fn enrich(&self, _tx: &mut TxEvent) {}
-    async fn baseline(&self, _tx: &TxEvent) -> Baseline {
-        Baseline::default()
-    }
-}
+pub use detection::{ContextSource, NoContext};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub chain_id: ChainId,
     /// The protected contract (the one registered with the Guardian).
     pub target: Address,
+    /// Every address whose involvement makes a transaction worth scoring:
+    /// the target plus any contracts that custody its assets (e.g. one vault
+    /// per asset). Always includes `target`.
+    pub watched_addresses: Vec<Address>,
     pub threshold: Confidence,
     /// Blocks that must be built on top of the triggering block before the
     /// pause is submitted. `0` acts as soon as the block is seen.
@@ -94,6 +70,7 @@ impl EngineConfig {
         Self {
             chain_id,
             target,
+            watched_addresses: vec![target],
             threshold,
             min_confirmations: 1,
             reorg_window: 64,
@@ -301,7 +278,7 @@ impl<C: ChainAdapter, P: Pauser, X: ContextSource> Engine<C, P, X> {
         report: &mut TickReport,
     ) {
         for mut tx in events {
-            if !touches_target(&tx, &self.cfg.target) {
+            if !touches_any(&tx, &self.cfg.watched_addresses) {
                 continue;
             }
             self.context.enrich(&mut tx).await;
@@ -419,6 +396,11 @@ impl<C: ChainAdapter, P: Pauser, X: ContextSource> Engine<C, P, X> {
 /// if it is sent to/from it, any call frame involves it, or any log was
 /// emitted by it or names it in a topic (an ERC-20 `Transfer` to or from the
 /// target carries its address as an indexed topic).
+pub fn touches_any(tx: &TxEvent, addresses: &[Address]) -> bool {
+    addresses.iter().any(|a| touches_target(tx, a))
+}
+
+/// [`touches_any`] for a single address.
 pub fn touches_target(tx: &TxEvent, target: &Address) -> bool {
     if tx.to.as_ref() == Some(target) || &tx.from == target {
         return true;

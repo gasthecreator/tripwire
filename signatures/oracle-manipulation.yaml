@@ -16,9 +16,11 @@ conditions:
     kind:
       type: oracle_price_deviation
       threshold_pct: 25.0
-    weight: 55.0
+    # Light on purpose: a large price move alone is what a whale trade in a
+    # thin pool also looks like (see reentrancy-basic.yaml).
+    weight: 30.0
   - id: outflow-following-price-move
     kind:
       type: fund_flow_delta
       threshold_pct: 15.0
-    weight: 40.0
+    weight: 70.0
