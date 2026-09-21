@@ -24,6 +24,50 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] The daemon was broken: rewrite as a reorg-aware engine, test on a real chain
+
+**Author:** Claude Code
+
+**What:** Re-reading `poll_once` against ARCHITECTURE.md §3.2 turned up
+that the shipped daemon (marked "done" in PLAN.md Slice 5) had never been
+tested end-to-end and was broken in ways no existing test could see: (1)
+with the default `min_confirmations = 1`, a transaction seen in the head
+block had 0 confirmations, hit `continue`, and its block was then marked
+processed, so it was never looked at again — the daemon could not pause
+anything; (2) it filtered on `tx.to == target`, but both real exploits
+replayed in this repo were sent to attacker contracts (the target appears
+only in logs/internal calls), so it would have missed both; (3) no reorg
+handling despite the architecture promising it; (4) no idempotency (a
+second exploit tx would try to re-pause and revert), and an RPC error
+mid-loop reprocessed blocks. Rewrote it as `tripwire_daemon::engine`:
+follows the chain with a remembered window of block hashes and rewinds on
+reorg (including chain shortening and reorgs deeper than the window);
+keeps pending pause decisions and re-checks them every tick against the
+canonical chain and required depth; cancels a pause whose block was
+reorged away; checks `paused()` first (fail toward action if unreadable);
+retries failed pauses; reads each block's header before and after its
+transactions and discards inconsistent reads; bounds catch-up per tick.
+Relevance is now `touches_target` (to/from, internal calls, logs emitted
+by or naming the target). Added `BlockHeader` + `block_header()` to the
+chain adapter, `is_paused` to the guardian client, and `ContextSource` (a
+hook for call-trace enrichment and real baselines) with `NoContext` as the
+default.
+
+**Verified:** 19 in-memory state-machine tests (reorg before/after
+confirmation, re-inclusion, shortening, deeper than window, mid-read
+change, retry, already-paused, duplicate txs, RPC failure, bounded
+catch-up, `touches_target` shapes) and 3 tests on a live `anvil` node with
+the real contracts, real adapter and real guardian client, including a
+**real reorg** (snapshot + revert) that cancels the pending pause.
+Local detect -> pause latency ~265 ms (one confirmation).
+
+**Still true, not fixed here:** `NoContext` means fund-flow/oracle/
+governance conditions fail closed in the running daemon, and call-trace
+conditions only work if the RPC serves `debug_traceTransaction`; real
+baseline sourcing and an in-process tracer are the next items.
+
+---
+
 ## [2026-09-21] Fix evidence double-counting in scoring (found by the Euler replay)
 
 **Author:** Claude Code

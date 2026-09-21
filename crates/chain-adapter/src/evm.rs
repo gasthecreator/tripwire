@@ -12,7 +12,9 @@ use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
-use tripwire_core::{Address as CoreAddress, CallFrame, CallKind, ChainId, LogEvent, TxEvent};
+use tripwire_core::{
+    Address as CoreAddress, BlockHeader, CallFrame, CallKind, ChainId, LogEvent, TxEvent,
+};
 
 use crate::{ChainAdapter, ChainAdapterError};
 
@@ -182,6 +184,20 @@ impl ChainAdapter for EvmAdapter {
             .get_block_number()
             .await
             .map_err(|e| ChainAdapterError::Transport(e.to_string()))
+    }
+
+    async fn block_header(&self, block_number: u64) -> Result<BlockHeader, ChainAdapterError> {
+        let block = self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .await
+            .map_err(|e| ChainAdapterError::Transport(e.to_string()))?
+            .ok_or(ChainAdapterError::BlockNotFound(block_number))?;
+        Ok(BlockHeader {
+            number: block_number,
+            hash: format!("{:#x}", block.header.hash),
+            parent_hash: format!("{:#x}", block.header.parent_hash),
+        })
     }
 
     async fn get_block_tx_events(
