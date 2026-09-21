@@ -38,6 +38,29 @@ lines of Solidity, not a rewrite.
 
 ## Deployment checklist
 
+**Preferred: the deploy script.** `contracts/script/DeployGuardian.sol`
+performs steps 1–4 below in one transaction sequence and then re-reads the
+resulting on-chain state, reverting if any promised property is missing:
+
+```bash
+export GUARDIAN_HOT_WALLET=0x...      # detection service key: PAUSER_ROLE only
+export GUARDIAN_TARGETS=0xVault1,0xVault2
+# Either reuse an existing timelock / Safe as admin...
+export GUARDIAN_EXISTING_ADMIN=0x...
+# ...or have the script deploy a TimelockController:
+export GUARDIAN_PROPOSERS=0xSafe GUARDIAN_EXECUTORS=0xSafe GUARDIAN_TIMELOCK_DELAY=86400
+forge script script/DeployGuardian.sol --rpc-url $RPC --account <keystore> --broadcast
+```
+
+What it refuses to do (each is a tested revert): use an EOA as admin; deploy
+a timelock with a delay under 10 minutes; make the hot wallet a proposer,
+executor or admin; use the deployer as the hot wallet; register an address
+with no code or without a `paused()` function. The deployer's temporary admin
+role is renounced before the script finishes. It does **not** touch your
+target contracts — step 5 is yours.
+
+The manual steps, if you need to do it differently:
+
 1. Deploy (or reuse) an OpenZeppelin `TimelockController` with your
    existing multisig as both proposer and executor. **Do not** use an
    EOA or the hot wallet described below as the timelock's proposer.
@@ -50,7 +73,9 @@ lines of Solidity, not a rewrite.
 4. Through the timelock (i.e., queue + execute a proposal, don't call
    these directly with an EOA even once during setup): call
    `guardian.grantRole(guardian.PAUSER_ROLE(), hotWalletAddress)` and
-   `guardian.registerTarget(yourContractAddress)`.
+   `guardian.registerTarget(yourContractAddress)`. `registerTarget` reverts
+   for an address with no code or with no `paused()`, so a mistyped address
+   fails now rather than during an exploit.
 5. On your own contract, grant whatever role gates your `pause()`/`unpause()`
    functions to the deployed `Guardian` contract's address — not to the
    hot wallet directly. The hot wallet talks to `Guardian`; `Guardian`
@@ -81,6 +106,24 @@ in code (`PAUSER_ROLE` for pause, `DEFAULT_ADMIN_ROLE` for unpause,
 never the same role) — an integration only defeats this protection by
 granting both roles to the same address, which nothing in Solidity can
 stop you from doing to yourself. Don't.
+
+## Configuring detection for your protocol
+
+Detection needs to know what your protocol holds and what belongs to it. None
+of this is inferred from the transaction being judged.
+
+- `TRIPWIRE_WATCHED_TOKENS`, `TRIPWIRE_EXTRA_HOLDERS`, `TRIPWIRE_WATCH_NATIVE`:
+  the assets and the contracts that custody them. Without these no fund-flow
+  evidence exists and the daemon can essentially never pause.
+- **Asset values** (recommended for anything that trades or lends): set
+  `TRIPWIRE_TOKEN_VALUES` (pegged assets), `TRIPWIRE_NATIVE_VALUE`, and/or
+  `TRIPWIRE_AAVE_V2_POOL`. With values, a swap or a borrow against fresh
+  collateral is not read as a drain. **Without them each asset is judged
+  alone, and value-neutral trades look like large outflows.** In the study
+  this produced false pauses on ordinary Curve and Aave activity; see
+  `docs/FALSE_POSITIVES.md`.
+- `TRIPWIRE_PROTOCOL_CONTRACTS`: your comptroller / router / registry, so a
+  callback out of the protocol and back in is recognised.
 
 ## Choosing a threshold
 

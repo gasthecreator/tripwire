@@ -60,6 +60,8 @@ sol! {
     interface ICToken { function underlying() external view returns (address); }
     #[sol(rpc)]
     interface ICurve3Pool { function coins(uint256 i) external view returns (address); }
+    #[sol(rpc)]
+    interface IErc20Meta { function decimals() external view returns (uint8); }
 }
 
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -232,10 +234,15 @@ async fn main() {
         return;
     };
     let seed = env_u64("FP_SEED", 20_260_921);
-    let n_windows = env_u64("FP_WINDOWS", 2_500) as usize;
+    let n_windows = if std::env::var("FP_ONLY_TXS").is_ok_and(|v| !v.is_empty()) {
+        0 // rescore mode: no sampling
+    } else {
+        env_u64("FP_WINDOWS", 2_500) as usize
+    };
     let lo = env_u64("FP_LO", 17_000_000);
     let hi = env_u64("FP_HI", 20_500_000);
     let trace_cap = env_u64("FP_TRACE_CAP", 10) as usize;
+    let netting = env_u64("FP_NETTING", 1) != 0;
     let out_path = std::env::var("FP_OUT").unwrap_or_else(|_| "docs/FALSE_POSITIVES.md".into());
 
     // Retry with backoff on 429/transient errors: this runs against a metered
@@ -280,6 +287,25 @@ async fn main() {
             eprintln!("   INCOMPLETE: {failed_windows} windows could not be fetched");
             incomplete = true;
         }
+        // FP_ONLY_TXS=0xhash,0xhash: rescore exactly these transactions (to
+        // re-check previously flagged ones) instead of the sampled windows.
+        let only: Vec<String> = std::env::var("FP_ONLY_TXS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        let restricted = !only.is_empty();
+        let txs = if restricted {
+            let mut m = BTreeMap::new();
+            for h in &only {
+                let t = adapter.get_tx_event(h).await.expect("tx");
+                m.insert(h.clone(), t.block_number);
+            }
+            m
+        } else {
+            txs
+        };
         println!("   {} distinct transactions with an outflow", txs.len());
 
         let mut cfg = ContextConfig::new(core(&proto.holders[0]));
@@ -292,6 +318,48 @@ async fn main() {
             "Compound V2" => vec![COMPOUND_COMPTROLLER.parse().unwrap()],
             _ => vec![],
         };
+        // Value netting (default): a swap or a collateral-backed borrow is not
+        // a drain. Aave and Compound are valued by their own oracles at the
+        // block before each transaction; Curve 3pool's stablecoins at $1.
+        if netting {
+            let valuer: Arc<dyn tripwire_context::TokenValuer> = match proto.name {
+                "Aave V2" => Arc::new(
+                    tripwire_context::AaveV2Oracle::connect(&rpc, &AAVE_V2_POOL.parse().unwrap())
+                        .await
+                        .expect("aave oracle"),
+                ),
+                "Compound V2" => {
+                    let map = proto
+                        .tokens
+                        .iter()
+                        .zip(&proto.holders)
+                        .map(|(t, h)| (core(t), core(h)))
+                        .collect();
+                    Arc::new(
+                        tripwire_context::CompoundOracle::connect(
+                            &rpc,
+                            &COMPOUND_COMPTROLLER.parse().unwrap(),
+                            map,
+                        )
+                        .await
+                        .expect("compound oracle"),
+                    )
+                }
+                _ => {
+                    let mut f = tripwire_context::FixedValues::new();
+                    for t in &proto.tokens {
+                        let d = IErc20Meta::new(*t, &provider)
+                            .decimals()
+                            .call()
+                            .await
+                            .expect("decimals");
+                        f = f.with_stable(core(t), d);
+                    }
+                    Arc::new(f)
+                }
+            };
+            cfg.valuer = Some(valuer);
+        }
         let ctx = Arc::new(EvmContext::connect(&rpc, cfg).unwrap());
         let target = core(&proto.holders[0]);
 
@@ -339,6 +407,15 @@ async fn main() {
                     };
                     let keys: Vec<String> =
                         d.counted_evidence.iter().map(|e| e.key.clone()).collect();
+                    if restricted {
+                        println!(
+                            "   RESCORE {} outflow {:.1}% confidence {:.0} evidence {:?}",
+                            hash,
+                            fraction * 100.0,
+                            d.confidence.value(),
+                            keys
+                        );
+                    }
                     Some(Sampled {
                         outcome: Outcome {
                             protocol: name,
@@ -431,6 +508,18 @@ async fn main() {
             }
         }
         let beyond_cap = cand.len().saturating_sub(trace_cap);
+        let untraced = cand.len() - n_traced;
+        let n_pop = sampled.len() as u64;
+        let paused_now = sampled.iter().filter(|x| x.outcome.paused).count() as u64;
+        let (_, worst_hi) = study::wilson_interval(paused_now + untraced as u64, n_pop, 1.96);
+        trace_notes.push(format!(
+            "  - {}: WORST CASE if every untraced candidate had paused: {}/{} = {:.3}% (95% upper {:.3}%).",
+            proto.name,
+            paused_now + untraced as u64,
+            n_pop,
+            100.0 * (paused_now + untraced as u64) as f64 / n_pop.max(1) as f64,
+            100.0 * worst_hi,
+        ));
         trace_notes.push(format!(
             "  - {}: {} candidates below the threshold with a fund-flow fact; {} traced; {} untraced ({} beyond the cap of {}, {} failed after retries, {} skipped after the {}s time budget).",
             proto.name, cand.len(), n_traced, cand.len() - n_traced, beyond_cap, trace_cap, n_failed, n_out_of_time, budget.as_secs()
@@ -475,7 +564,7 @@ If the shipped detector, configured for a real protocol, ran on that protocol's 
 - **Protocols** (discovered on-chain, not hard-coded): Aave V2 (every reserve's aToken as a custody contract, underlying as the watched asset), Compound V2 (every cToken with an ERC-20 underlying), Curve 3pool.
 - **Sample:** {n_windows} seeded-random windows of 10 blocks per protocol, drawn from blocks {lo}–{hi} (seed {seed}). For each, every ERC-20 transfer *out of* the protocol's custody contracts is collected; each distinct transaction is one member of the population.
 - **Why only transactions with an outflow:** a pause requires a fund-flow (\"harm\") fact — enforced by a test on the shipped signatures — so a transaction that moves nothing out of the protocol cannot pause it, whatever else it does.
-- **Scoring:** the production `tripwire-context` baseline (real balances at the previous block, ERC-20 logs net of inflows, Uniswap-V2 price movement) and the **shipped, un-tuned signatures** at the default threshold of 80.
+- **Scoring:** the production `tripwire-context` baseline (real balances at the previous block, {netting_desc}, Uniswap-V2 price movement) and the **shipped, un-tuned signatures** at the default threshold of 80.
 - **Traces:** only transactions that already have a fund-flow fact but sit below the threshold could be pushed over by a call-pattern fact (flash-loan entrypoint, re-entry), so only those were traced with `cast run`, largest first, capped at {trace_cap} per protocol.
 
 ## Results
@@ -498,10 +587,11 @@ Distribution of the largest single-asset outflow fraction over all sampled trans
 - Tracing is bounded (cap, time budget, failures). Untraced candidates could in principle have paused; per protocol:\n{trace_notes}
 - Native ETH outflows and non-Uniswap-V2 price movement are out of scope here.
 - Legitimate traffic is drawn from history that may contain a small number of exploit transactions; any \"would pause\" above should be read individually.
-- Three real exploits are detected by the same configuration (see `PLAN.md`); three is not a recall estimate.
+- Four real exploits (Beanstalk, Euler, Warp Finance, Rari/Fei Fuse) are detected by the same configuration (see `PLAN.md`); four is not a recall estimate.
 ",
         n_windows = n_windows, lo = lo, hi = hi, seed = seed, trace_cap = trace_cap,
         table = table,
+        netting_desc = if netting { "fund flow measured as net *value* lost across all the protocol's watched assets, valued at the block before each transaction: Aave V2 and Compound V2 by their own oracles, Curve 3pool's stablecoins at $1" } else { "ERC-20 logs net of inflows, one asset at a time" },
         trace_notes = trace_notes.join("\n"),
         b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4],
         paused = if paused_details.is_empty() { "None in the sample.".to_string() } else { paused_details.join("\n") },

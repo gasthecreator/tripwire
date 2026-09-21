@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
     ctx_cfg.holders = holders;
     ctx_cfg.watched_tokens = watched_tokens;
     ctx_cfg.protocol_contracts = protocol_contracts;
+    ctx_cfg.valuer = build_valuer(&rpc_url).await?;
     ctx_cfg.watch_native = watch_native;
     ctx_cfg.track_amm_prices = env_or("TRIPWIRE_TRACK_AMM_PRICES", "true").parse::<bool>()?;
     ctx_cfg.trace_fallback = match env_or("TRIPWIRE_TRACE_FALLBACK", "none").as_str() {
@@ -154,4 +155,66 @@ fn gwei_to_wei(s: &str) -> anyhow::Result<u128> {
         "gwei amount must be finite and non-negative: {s}"
     );
     Ok((g * 1e9).round() as u128)
+}
+
+/// Optional asset valuation, so fund flow is measured as net *value* lost
+/// (a swap or a collateral-backed borrow is not a drain).
+///
+/// * `TRIPWIRE_TOKEN_VALUES` — `address:decimals:value_per_token` pairs, e.g.
+///   `0xA0b8...eB48:6:1.0,0x6B17...1d0F:18:1.0` for stablecoins.
+/// * `TRIPWIRE_NATIVE_VALUE` — value of 1 ETH in the same unit.
+/// * `TRIPWIRE_AAVE_V2_POOL` — value every other asset with that pool's own
+///   price oracle (ETH-denominated). Mixing it with the fixed values above
+///   assumes they share the oracle's unit (ETH).
+///
+/// Fixed values take precedence. Unset means the strict per-asset rule.
+async fn build_valuer(
+    rpc_url: &str,
+) -> anyhow::Result<Option<std::sync::Arc<dyn tripwire_context::TokenValuer>>> {
+    use tripwire_context::{AaveV2Oracle, FixedValues, Layered, TokenValuer};
+    let mut layers: Vec<std::sync::Arc<dyn TokenValuer>> = Vec::new();
+
+    let mut fixed = FixedValues::new();
+    let mut any_fixed = false;
+    for item in env_or("TRIPWIRE_TOKEN_VALUES", "")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let parts: Vec<&str> = item.split(':').collect();
+        anyhow::ensure!(
+            parts.len() == 3,
+            "TRIPWIRE_TOKEN_VALUES entry `{item}` must be address:decimals:value"
+        );
+        fixed = fixed.with_token(
+            parts[0]
+                .parse::<Address>()
+                .map_err(|e| anyhow::anyhow!("bad address `{}`: {e}", parts[0]))?,
+            parts[1].parse()?,
+            parts[2].parse()?,
+        );
+        any_fixed = true;
+    }
+    if let Ok(v) = std::env::var("TRIPWIRE_NATIVE_VALUE") {
+        if !v.is_empty() {
+            fixed = fixed.with_native(v.parse()?);
+            any_fixed = true;
+        }
+    }
+    if any_fixed {
+        layers.push(std::sync::Arc::new(fixed));
+    }
+    let pool = env_or("TRIPWIRE_AAVE_V2_POOL", "");
+    if !pool.is_empty() {
+        let pool: Address = pool.parse().map_err(|e| anyhow::anyhow!("bad pool: {e}"))?;
+        layers.push(std::sync::Arc::new(
+            AaveV2Oracle::connect(rpc_url, &pool)
+                .await
+                .map_err(anyhow::Error::msg)?,
+        ));
+    }
+    Ok(match layers.len() {
+        0 => None,
+        _ => Some(std::sync::Arc::new(Layered(layers))),
+    })
 }

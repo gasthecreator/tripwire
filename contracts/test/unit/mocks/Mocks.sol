@@ -21,6 +21,15 @@ contract MockERC20 {
         emit Transfer(msg.sender, to, amount);
         return true;
     }
+
+    /// Test-only: no allowance check, so a mock "protocol" can pull payment
+    /// from a counterparty inside one transaction.
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(from, to, amount);
+        return true;
+    }
 }
 
 /// Emits Uniswap-V2-style `Sync` events and serves `getReserves`.
@@ -50,6 +59,15 @@ contract MockVault {
     function drainAndMove(MockERC20 token, address to, uint256 amount, MockV2Pair pair, uint112 a, uint112 b) external {
         token.transfer(to, amount);
         pair.setReserves(a, b);
+    }
+
+    /// A trade: sends `amountOut` of `tokenOut` to the counterparty and takes
+    /// `amountIn` of `tokenIn` from them, in one transaction.
+    function swap(MockERC20 tokenOut, MockERC20 tokenIn, address counterparty, uint256 amountOut, uint256 amountIn)
+        external
+    {
+        tokenOut.transfer(counterparty, amountOut);
+        tokenIn.transferFrom(counterparty, address(this), amountIn);
     }
 
     function drainNative(address payable to, uint256 amount) external {

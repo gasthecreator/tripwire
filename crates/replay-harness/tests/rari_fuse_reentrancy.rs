@@ -126,4 +126,34 @@ async fn rari_fuse_reentrancy_exploit_with_shipped_generic_signatures() {
     let mut no_drain = baseline.clone();
     no_drain.outflow_wei = 0;
     assert!(!score(&tx, &no_drain).should_pause());
+
+    // The same attack with value netting on: USDC/USDT/FRAX at $1 and ETH at
+    // an illustrative $2,900 (the price only needs to be the right order of
+    // magnitude). The attacker deposits 150M USDC of flash-loaned collateral
+    // and takes back far more value than they put in, so it must still show
+    // as a loss.
+    let mut cfg = ContextConfig::new(MARKETS[0].parse().unwrap());
+    cfg.holders = MARKETS.iter().map(|a| a.parse().unwrap()).collect();
+    cfg.watched_tokens = TOKENS.iter().map(|a| a.parse().unwrap()).collect();
+    cfg.watch_native = true;
+    cfg.protocol_contracts = vec![COMPTROLLER.parse().unwrap()];
+    cfg.valuer = Some(std::sync::Arc::new(
+        tripwire_context::FixedValues::new()
+            .with_stable(TOKENS[0].parse().unwrap(), 6)
+            .with_stable(TOKENS[1].parse().unwrap(), 6)
+            .with_stable(TOKENS[2].parse().unwrap(), 18)
+            .with_native(2_900.0),
+    ));
+    let netted = EvmContext::connect(&rpc_url, cfg).expect("context");
+    let nb = netted.baseline(&tx).await;
+    let lost = nb.outflow_wei as f64 / nb.balance_baseline_wei.max(1) as f64;
+    println!("value-netted loss: {:.1}%", lost * 100.0);
+    let nd = score(&tx, &nb);
+    println!(
+        "NETTED: confidence {:.1} evidence {:?}",
+        nd.confidence.value(),
+        keys_of(&nd)
+    );
+    assert!(lost > 0.5, "netted loss was {lost}");
+    assert!(nd.should_pause(), "netted: {}", nd.confidence.value());
 }

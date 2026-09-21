@@ -38,5 +38,11 @@ conditions:
   - id: outflow-during-reentry
     kind:
       type: fund_flow_delta
-      threshold_pct: 5.0
+      # Same as every other shipped fund-flow condition (see the guard test
+      # in crates/detection/tests/shipped_signatures.rs): evidence is shared
+      # across signatures, so the LOWEST fund-flow threshold anywhere becomes
+      # the harm threshold for every transaction. It was 5%, which let an
+      # ordinary 6% withdrawal alongside a flash loan reach the pause
+      # threshold (found by the false-positive study).
+      threshold_pct: 15.0
     weight: 70.0
