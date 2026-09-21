@@ -188,6 +188,46 @@ fn a_drain_plus_any_single_supporting_fact_pauses() {
         d.confidence.value()
     );
 
+    // drain + cross-contract callback re-entry (needs the protocol set)
+    let mut b = outflow_pct(50);
+    b.protocol_addresses = vec![
+        "0x00000000000000000000000000000000000000a1"
+            .parse()
+            .unwrap(),
+        "0x00000000000000000000000000000000000000a2"
+            .parse()
+            .unwrap(),
+    ];
+    let hop = |depth: u32, addr: &str, selector: Option<&str>| CallFrame {
+        depth,
+        from: Address::ZERO,
+        to: Address::from_str(addr).unwrap(),
+        selector: selector.map(String::from),
+        value_wei: 0,
+        kind: CallKind::Call,
+    };
+    let d = run(
+        &tx(vec![
+            hop(
+                0,
+                "0x00000000000000000000000000000000000000a1",
+                Some("0xaaaaaaaa"),
+            ),
+            hop(1, "0x00000000000000000000000000000000000000ee", None),
+            hop(
+                2,
+                "0x00000000000000000000000000000000000000a2",
+                Some("0xbbbbbbbb"),
+            ),
+        ]),
+        &b,
+    );
+    assert!(
+        d.should_pause(),
+        "drain + callback re-entry scored {}",
+        d.confidence.value()
+    );
+
     // drain + a price move
     let mut b = outflow_pct(50);
     b.reference_price = Some(1.0);

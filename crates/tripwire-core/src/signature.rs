@@ -70,6 +70,18 @@ pub enum ConditionKind {
     /// call stack at least `min_depth_delta` levels up. Read-only
     /// `STATICCALL`s and already-returned calls never count.
     ReentrancyDepth { min_depth_delta: u32 },
+    /// Fires if, while a state-changing call into a *protocol contract* is
+    /// still active, that protocol calls out to a contract outside the
+    /// protocol and the outside contract calls back into a protocol
+    /// contract before the original call returns. This is the cross-contract
+    /// callback re-entry behind e.g. the Rari/Fei Fuse exploit (a market
+    /// sends ETH to the borrower, whose `receive()` calls the Comptroller
+    /// before the borrow is booked), which `ReentrancyDepth` cannot see
+    /// because the re-entered function differs. Needs the protocol's contract
+    /// set (`Baseline::protocol_addresses`); with none configured it never
+    /// fires. Legitimate flash-loan receivers do the same, so this is
+    /// supporting evidence, never a harm fact.
+    ProtocolCallbackReentry {},
     /// Fires if a governance proposal's voting power for a single
     /// address increases by more than `threshold_pct` within the window
     /// — the flash-loaned-voting-power pattern (e.g. Beanstalk, Apr 2022).
@@ -111,6 +123,7 @@ impl ConditionKind {
             }
             ConditionKind::OraclePriceDeviation { .. } => "oracle_price_deviation".into(),
             ConditionKind::ReentrancyDepth { .. } => "reentrancy".into(),
+            ConditionKind::ProtocolCallbackReentry {} => "protocol_callback_reentry".into(),
             ConditionKind::GovernanceProposalAnomaly { .. } => "governance_voting_power".into(),
         }
     }

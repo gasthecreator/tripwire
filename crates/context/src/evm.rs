@@ -61,6 +61,11 @@ pub struct ContextConfig {
     /// per-protocol configuration — the assets a protocol custodies — not
     /// something inferred from the transaction being judged.
     pub watched_tokens: Vec<Address>,
+    /// Further contracts that belong to the protocol but hold no watched
+    /// balance (typically the Comptroller/registry/router). Together with
+    /// `holders` and `target` these form the set used to recognise callback
+    /// re-entry across protocol contracts.
+    pub protocol_contracts: Vec<Address>,
     /// Also watch native ETH (requires a call trace).
     pub watch_native: bool,
     /// Measure Uniswap-V2-style pool price movement from `Sync` events.
@@ -76,6 +81,7 @@ impl ContextConfig {
             target,
             holders: vec![target],
             watched_tokens: Vec::new(),
+            protocol_contracts: Vec::new(),
             watch_native: false,
             track_amm_prices: true,
             max_pairs: 16,
@@ -263,6 +269,12 @@ impl ContextSource for EvmContext {
 
     async fn baseline(&self, tx: &TxEvent) -> Baseline {
         let mut b = Baseline::default();
+        let mut set = vec![self.cfg.target];
+        set.extend(self.cfg.holders.iter().copied());
+        set.extend(self.cfg.protocol_contracts.iter().copied());
+        set.sort();
+        set.dedup();
+        b.protocol_addresses = set;
         if tx.block_number == 0 {
             return b;
         }

@@ -24,7 +24,17 @@ conditions:
     # evidence *without* a harm fact (funds leaving, voting power taken)
     # combined must stay below a pause threshold. Enforced by
     # tests/shipped_signatures.rs.
-    weight: 15.0
+    weight: 10.0
+  # Cross-contract variant: the protocol calls out and the callee calls back
+  # into a *different* protocol function/contract before the first call
+  # returns (Rari/Fei Fuse, Apr 2022: CEther.borrow -> attacker.receive ->
+  # Comptroller.exitMarket). Needs the protocol's contract set
+  # (TRIPWIRE_PROTOCOL_CONTRACTS); inert without it. Same light weight and
+  # same rule: never a pause on its own.
+  - id: callback-into-protocol
+    kind:
+      type: protocol_callback_reentry
+    weight: 10.0
   - id: outflow-during-reentry
     kind:
       type: fund_flow_delta

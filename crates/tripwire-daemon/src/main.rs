@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     // below the pause threshold. So refuse to run silently blind.
     let watched_tokens = parse_addresses(&env_or("TRIPWIRE_WATCHED_TOKENS", ""))?;
     let extra_holders = parse_addresses(&env_or("TRIPWIRE_EXTRA_HOLDERS", ""))?;
+    let protocol_contracts = parse_addresses(&env_or("TRIPWIRE_PROTOCOL_CONTRACTS", ""))?;
     let watch_native = env_or("TRIPWIRE_WATCH_NATIVE", "false").parse::<bool>()?;
     if watched_tokens.is_empty() && !watch_native {
         tracing::warn!(
@@ -70,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ctx_cfg = ContextConfig::new(target);
     ctx_cfg.holders = holders;
     ctx_cfg.watched_tokens = watched_tokens;
+    ctx_cfg.protocol_contracts = protocol_contracts;
     ctx_cfg.watch_native = watch_native;
     ctx_cfg.track_amm_prices = env_or("TRIPWIRE_TRACK_AMM_PRICES", "true").parse::<bool>()?;
     ctx_cfg.trace_fallback = match env_or("TRIPWIRE_TRACE_FALLBACK", "none").as_str() {
