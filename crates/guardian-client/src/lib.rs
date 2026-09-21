@@ -23,6 +23,11 @@ sol! {
         function unpause(address target) external;
         function registeredTargets(address target) external view returns (bool);
     }
+
+    #[sol(rpc)]
+    interface IPausableTarget {
+        function paused() external view returns (bool);
+    }
 }
 
 #[derive(Debug, Error)]
@@ -117,6 +122,20 @@ impl<P: Provider> GuardianClient<P> {
         );
 
         Ok(format!("{:#x}", receipt.transaction_hash))
+    }
+
+    /// Whether `target` is currently paused, read straight from the
+    /// target contract. Lets the daemon avoid submitting a pause that
+    /// would only revert (and burn gas) because something already paused
+    /// the protocol — including a previous Tripwire pause.
+    pub async fn is_paused(&self, target: &str) -> Result<bool, GuardianClientError> {
+        let address = AlloyAddress::from_str(target)
+            .map_err(|e| GuardianClientError::InvalidAddress(e.to_string()))?;
+        IPausableTarget::new(address, self.contract.provider())
+            .paused()
+            .call()
+            .await
+            .map_err(|e| GuardianClientError::Submission(e.to_string()))
     }
 
     /// Read-only check of whether a target is currently registered with

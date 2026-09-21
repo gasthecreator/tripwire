@@ -35,6 +35,16 @@ impl TxEvent {
     }
 }
 
+/// The minimum a listener needs to follow a chain and notice reorgs: a
+/// block's identity and its link to its parent. Chain-agnostic on purpose —
+/// any chain with hash-linked blocks fits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockHeader {
+    pub number: u64,
+    pub hash: String,
+    pub parent_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEvent {
     pub address: Address,

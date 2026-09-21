@@ -10,7 +10,7 @@ pub mod evm;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tripwire_core::{ChainId, TxEvent};
+use tripwire_core::{BlockHeader, ChainId, TxEvent};
 
 #[derive(Debug, Error)]
 pub enum ChainAdapterError {
@@ -32,6 +32,12 @@ pub trait ChainAdapter: Send + Sync {
 
     /// The chain's current head block number.
     async fn latest_block_number(&self) -> Result<u64, ChainAdapterError>;
+
+    /// Identity and parent link of one block, or `BlockNotFound` if the
+    /// chain doesn't currently have that block (e.g. it was reorged away
+    /// or is beyond the head). This is what lets a listener detect reorgs:
+    /// a block number whose hash changed is a different block.
+    async fn block_header(&self, block_number: u64) -> Result<BlockHeader, ChainAdapterError>;
 
     /// Every confirmation-relevant fact the listener needs about one
     /// block's transactions, normalized to `TxEvent`. `confirmations` on

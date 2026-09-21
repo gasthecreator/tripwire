@@ -99,12 +99,24 @@ before merge, docs updated in the same PR as the code they describe.
       `ChainAdapter` → `detection::evaluate` → `GuardianClient` into one
       polling loop with a confirmation-depth gate, startup validation
       that its target is actually registered with the Guardian, and a
-      shutdown handler. **Proven end-to-end**, not just unit-tested in
-      isolation: an integration test deploys the real compiled
-      `Guardian`/`GuardedVault` bytecode to a live local `anvil`,
-      registers the vault, and pauses it entirely through
-      `guardian_client::connect` + `submit_pause` — then confirms a
-      non-pauser key using the same code path fails on-chain.
+      shutdown handler. The guardian-client half is proven end-to-end by an
+      integration test that deploys the real compiled `Guardian`/
+      `GuardedVault` bytecode to a live local `anvil`, registers the
+      vault, and pauses it through `guardian_client::connect` +
+      `submit_pause`, then confirms a non-pauser key using the same code
+      path fails on-chain. **Correction (2026-09-21):** the *daemon* half
+      had never been exercised end-to-end and was broken: with default
+      settings it could never pause anything (a transaction seen at 0
+      confirmations was skipped and its block then marked processed, so
+      it was never re-evaluated), it only looked at transactions whose
+      `to` was the target (both real exploits replayed here were sent to
+      attacker contracts), and it had no reorg handling, no idempotency
+      and reprocessed blocks after a mid-loop RPC error. Rewritten as
+      `tripwire_daemon::engine` (canonical-chain tracking with a reorg
+      window, pending pauses re-checked every tick and cancelled if their
+      block is reorged away, an `is_paused` check, retry on failure,
+      bounded catch-up), with 19 in-memory state-machine tests and 3
+      live-`anvil` tests including a real reorg.
 - [ ] **Slice 6 — Historical exploit replay harness.** Foundry fork tests
       against real mainnet history. **Status: two of four done.**
       Beanstalk Farms (Apr 17, 2022) is verified — tx

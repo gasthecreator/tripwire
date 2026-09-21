@@ -1,28 +1,15 @@
-//! The daemon binary: wires the pieces from ARCHITECTURE.md §3 together
-//! into one process — chain adapter → detection engine → guardian
-//! client. Configuration is environment-variable-driven on purpose
-//! (see `.env.example`): this is the process a real deployment runs
-//! continuously, not a one-shot CLI tool.
+//! The daemon binary: wires the real chain adapter and Guardian client into
+//! the reorg-aware engine (`tripwire_daemon::engine`) and ticks it.
 //!
-//! **Known simplification, stated plainly rather than hidden:** the
-//! `Baseline` this daemon builds per transaction (balance/price/voting-
-//! power context — `detection::Baseline`) is currently a placeholder
-//! that reads no real chain state. Wiring real baseline computation
-//! (the watched contract's actual balance history, a real TWAP or
-//! second-oracle price feed, real governance voting-power lookups) is
-//! tracked as PLAN.md's next slice — the detection engine and its
-//! scoring are fully real and tested (see `crates/detection`); what's
-//! simplified here is *only* how this binary currently sources the
-//! external context those conditions compare against.
+//! Configuration is environment-driven (see `.env.example`); this is the
+//! process a deployment runs continuously.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use alloy::providers::Provider;
 use chain_adapter::evm::EvmAdapter;
-use chain_adapter::ChainAdapter;
-use detection::Baseline;
 use tripwire_core::{ChainId, Confidence};
+use tripwire_daemon::{Engine, EngineConfig, NoContext};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,32 +18,12 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let rpc_url = require_env("TRIPWIRE_RPC_URL")?;
-    let chain_id = ChainId(
-        std::env::var("TRIPWIRE_CHAIN_ID")
-            .unwrap_or_else(|_| "1".into())
-            .parse()?,
-    );
+    let chain_id = ChainId(env_or("TRIPWIRE_CHAIN_ID", "1").parse()?);
     let guardian_address = require_env("TRIPWIRE_GUARDIAN_ADDRESS")?;
     let target_contract = require_env("TRIPWIRE_TARGET_CONTRACT")?;
     let pauser_key = require_env("TRIPWIRE_PAUSER_PRIVATE_KEY")?;
-    let signatures_dir = PathBuf::from(
-        std::env::var("TRIPWIRE_SIGNATURES_DIR").unwrap_or_else(|_| "signatures".into()),
-    );
-    let pause_threshold = Confidence::new(
-        std::env::var("TRIPWIRE_PAUSE_THRESHOLD")
-            .unwrap_or_else(|_| "80".into())
-            .parse()?,
-    );
-    // ARCHITECTURE.md §3.2: detection can start at 0 confirmations, but
-    // the pause *decision* is gated on a minimum depth. This is that gate.
-    let min_confirmations: u64 = std::env::var("TRIPWIRE_MIN_CONFIRMATIONS")
-        .unwrap_or_else(|_| "1".into())
-        .parse()?;
-    let poll_interval = Duration::from_secs(
-        std::env::var("TRIPWIRE_POLL_INTERVAL_SECS")
-            .unwrap_or_else(|_| "2".into())
-            .parse()?,
-    );
+    let signatures_dir = PathBuf::from(env_or("TRIPWIRE_SIGNATURES_DIR", "signatures"));
+    let poll_interval = Duration::from_millis(env_or("TRIPWIRE_POLL_INTERVAL_MS", "2000").parse()?);
 
     let signatures = detection::load_signatures_from_dir(&signatures_dir)?;
     tracing::info!(count = signatures.len(), dir = %signatures_dir.display(), "loaded signatures");
@@ -71,130 +38,46 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let target_address: tripwire_core::Address = target_contract.parse()?;
-    let mut last_processed_block = adapter.latest_block_number().await?;
-    tracing::info!(
-        start_block = last_processed_block,
-        "tripwire daemon started"
+    let mut cfg = EngineConfig::new(
+        chain_id,
+        target_contract.parse()?,
+        Confidence::new(env_or("TRIPWIRE_PAUSE_THRESHOLD", "80").parse()?),
     );
+    cfg.min_confirmations = env_or("TRIPWIRE_MIN_CONFIRMATIONS", "1").parse()?;
+    cfg.reorg_window = env_or("TRIPWIRE_REORG_WINDOW", "64").parse()?;
+    cfg.max_blocks_per_tick = env_or("TRIPWIRE_MAX_BLOCKS_PER_TICK", "32").parse()?;
+
+    let mut engine = Engine::new(adapter, guardian, NoContext, signatures, cfg);
+    tracing::info!(?poll_interval, "tripwire daemon started");
 
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
-
     loop {
         tokio::select! {
             _ = &mut shutdown => {
                 tracing::info!("shutdown signal received, exiting cleanly");
-                break;
+                return Ok(());
             }
             _ = tokio::time::sleep(poll_interval) => {
-                if let Err(e) = poll_once(
-                    &adapter,
-                    &guardian,
-                    &signatures,
-                    chain_id,
-                    target_address,
-                    pause_threshold,
-                    min_confirmations,
-                    &mut last_processed_block,
-                )
-                .await
-                {
-                    // A single poll failing (a transient RPC error, most
-                    // likely) must not crash the daemon -- that would be
-                    // strictly worse than today's human-mediated status
-                    // quo (SECURITY.md T3: a silently-down listener is
-                    // the failure mode to avoid). Logged loudly, retried
-                    // next tick.
-                    tracing::error!(error = %e, "poll iteration failed, will retry next tick");
+                // A failed tick (a transient RPC error, most likely) must not
+                // crash the daemon: that would be strictly worse than the
+                // human-mediated status quo (SECURITY.md T3). Engine state is
+                // only advanced per fully-read block, so the retry is safe.
+                match engine.tick().await {
+                    Ok(r) if r.blocks_processed > 0 || !r.pauses.is_empty() || r.reorg_depth.is_some() => {
+                        tracing::info!(?r, "tick");
+                    }
+                    Ok(r) => tracing::debug!(head = r.head, pending = r.pending, "tick"),
+                    Err(e) => tracing::error!(error = %e, "tick failed, will retry"),
                 }
             }
         }
     }
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn poll_once<P: Provider>(
-    adapter: &EvmAdapter,
-    guardian: &guardian_client::GuardianClient<P>,
-    signatures: &[tripwire_core::Signature],
-    chain_id: ChainId,
-    target_address: tripwire_core::Address,
-    pause_threshold: Confidence,
-    min_confirmations: u64,
-    last_processed_block: &mut u64,
-) -> anyhow::Result<()> {
-    let head = adapter.latest_block_number().await?;
-    if head <= *last_processed_block {
-        return Ok(());
-    }
-
-    for block_number in (*last_processed_block + 1)..=head {
-        let events = adapter.get_block_tx_events(block_number).await?;
-        for tx in &events {
-            if tx.to != Some(target_address) {
-                continue;
-            }
-
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // Placeholder baseline -- see module doc. Detection still
-            // runs and scores correctly against whatever's here; only
-            // fund-flow/oracle/governance conditions that depend on real
-            // external context will under-fire until real baseline
-            // sourcing lands.
-            let baseline = Baseline::default();
-
-            let decision = detection::evaluate(
-                signatures,
-                chain_id,
-                target_address,
-                tx,
-                &baseline,
-                pause_threshold,
-                now,
-            );
-
-            if !decision.matches.is_empty() {
-                tracing::info!(
-                    tx_hash = %tx.tx_hash,
-                    confidence = decision.confidence.value(),
-                    threshold = decision.threshold.value(),
-                    signatures = ?decision.matches.iter().map(|m| &m.signature_id).collect::<Vec<_>>(),
-                    "signature match"
-                );
-            }
-
-            if decision.should_pause() {
-                if tx.confirmations < min_confirmations {
-                    tracing::warn!(
-                        tx_hash = %tx.tx_hash,
-                        confirmations = tx.confirmations,
-                        required = min_confirmations,
-                        "pause threshold crossed but confirmation depth not yet met; re-evaluating next tick"
-                    );
-                    continue;
-                }
-                tracing::warn!(tx_hash = %tx.tx_hash, confidence = decision.confidence.value(), "PAUSING target contract");
-                match guardian.submit_pause(&decision).await {
-                    Ok(pause_tx_hash) => {
-                        tracing::warn!(pause_tx_hash, "guardian pause submitted and confirmed");
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to submit guardian pause -- manual intervention required");
-                    }
-                }
-            }
-        }
-    }
-
-    *last_processed_block = head;
-    Ok(())
 }
 
 fn require_env(key: &str) -> anyhow::Result<String> {
     std::env::var(key).map_err(|_| anyhow::anyhow!("missing required environment variable: {key}"))
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.into())
 }
