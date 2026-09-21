@@ -7,6 +7,7 @@
 //! is simply not satisfied — a missing number is never guessed.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::eips::BlockId;
@@ -19,7 +20,8 @@ use tripwire_core::{Address, TxEvent};
 
 use crate::amm;
 use crate::cast_trace;
-use crate::outflow::{self, AssetFlow};
+use crate::outflow::{self, AssetFlow, TokenMove};
+use crate::value::{TokenValuer, NATIVE};
 
 sol! {
     #[sol(rpc)]
@@ -61,6 +63,17 @@ pub struct ContextConfig {
     /// per-protocol configuration — the assets a protocol custodies — not
     /// something inferred from the transaction being judged.
     pub watched_tokens: Vec<Address>,
+    /// Further contracts that belong to the protocol but hold no watched
+    /// balance (typically the Comptroller/registry/router). Together with
+    /// `holders` and `target` these form the set used to recognise callback
+    /// re-entry across protocol contracts.
+    pub protocol_contracts: Vec<Address>,
+    /// Values the watched assets so fund flow is measured as net *value* lost
+    /// (a swap or a collateral-backed borrow nets to ~0) instead of one asset
+    /// at a time. Prices are taken at the block before the transaction. If a
+    /// moved asset has no value, that transaction falls back to the per-asset
+    /// rule. `None` keeps the per-asset rule everywhere.
+    pub valuer: Option<Arc<dyn TokenValuer>>,
     /// Also watch native ETH (requires a call trace).
     pub watch_native: bool,
     /// Measure Uniswap-V2-style pool price movement from `Sync` events.
@@ -76,6 +89,8 @@ impl ContextConfig {
             target,
             holders: vec![target],
             watched_tokens: Vec::new(),
+            protocol_contracts: Vec::new(),
+            valuer: None,
             watch_native: false,
             track_amm_prices: true,
             max_pairs: 16,
@@ -190,7 +205,77 @@ impl EvmContext {
         v
     }
 
+    /// Value-netted fund flow across every watched asset and holder.
+    ///
+    /// `Ok(None)` means "valued everything, nothing net left". `Err(())` means
+    /// the netted view is unavailable for this transaction (an asset that
+    /// moved has no value, or a needed balance could not be read) and the
+    /// caller must use the stricter per-asset rule instead.
+    async fn value_netted_flow(
+        &self,
+        tx: &TxEvent,
+        prev: u64,
+        valuer: &Arc<dyn TokenValuer>,
+    ) -> Result<Option<AssetFlow>, ()> {
+        let mut moves = Vec::new();
+        let mut assets: Vec<Option<&Address>> = self.cfg.watched_tokens.iter().map(Some).collect();
+        if self.cfg.watch_native {
+            assets.push(None); // native ETH
+        }
+        for asset in assets {
+            let (mut out_total, mut in_total) = (0u128, 0u128);
+            let mut losers: Vec<&Address> = Vec::new();
+            for holder in &self.cfg.holders {
+                let (o, i) = match asset {
+                    Some(t) => outflow::erc20_flows(&tx.logs, t, holder),
+                    None => outflow::native_flows(&tx.call_frames, holder),
+                };
+                out_total = out_total.saturating_add(o);
+                in_total = in_total.saturating_add(i);
+                if o > i {
+                    losers.push(holder);
+                }
+            }
+            if out_total == 0 && in_total == 0 {
+                continue;
+            }
+            let key = asset.copied().unwrap_or(NATIVE);
+            let Some(unit_value) = valuer.unit_value(&key, prev).await else {
+                return Err(());
+            };
+            let net_out = (out_total.min(i128::MAX as u128) as i128)
+                .saturating_sub(in_total.min(i128::MAX as u128) as i128);
+            let mut balance = 0u128;
+            if net_out > 0 {
+                for holder in losers {
+                    let bal = match asset {
+                        Some(t) => self.token_balance(t, holder, prev).await,
+                        None => self.native_balance(holder, prev).await,
+                    };
+                    match bal {
+                        Some(b) => balance = balance.saturating_add(b),
+                        None => return Err(()),
+                    }
+                }
+            }
+            moves.push(TokenMove {
+                net_out,
+                balance,
+                unit_value,
+            });
+        }
+        Ok(outflow::value_netted_flow(&moves))
+    }
+
     async fn fund_flow(&self, tx: &TxEvent, prev: u64) -> Option<AssetFlow> {
+        if let Some(valuer) = &self.cfg.valuer {
+            match self.value_netted_flow(tx, prev, valuer).await {
+                Ok(flow) => return flow,
+                Err(()) => {
+                    tracing::debug!(tx = %tx.tx_hash, "value netting unavailable; using per-asset flow")
+                }
+            }
+        }
         let mut flows = Vec::new();
         for holder in &self.cfg.holders {
             for token in &self.cfg.watched_tokens {
@@ -263,6 +348,12 @@ impl ContextSource for EvmContext {
 
     async fn baseline(&self, tx: &TxEvent) -> Baseline {
         let mut b = Baseline::default();
+        let mut set = vec![self.cfg.target];
+        set.extend(self.cfg.holders.iter().copied());
+        set.extend(self.cfg.protocol_contracts.iter().copied());
+        set.sort();
+        set.dedup();
+        b.protocol_addresses = set;
         if tx.block_number == 0 {
             return b;
         }

@@ -107,6 +107,24 @@ never the same role) — an integration only defeats this protection by
 granting both roles to the same address, which nothing in Solidity can
 stop you from doing to yourself. Don't.
 
+## Configuring detection for your protocol
+
+Detection needs to know what your protocol holds and what belongs to it. None
+of this is inferred from the transaction being judged.
+
+- `TRIPWIRE_WATCHED_TOKENS`, `TRIPWIRE_EXTRA_HOLDERS`, `TRIPWIRE_WATCH_NATIVE`:
+  the assets and the contracts that custody them. Without these no fund-flow
+  evidence exists and the daemon can essentially never pause.
+- **Asset values** (recommended for anything that trades or lends): set
+  `TRIPWIRE_TOKEN_VALUES` (pegged assets), `TRIPWIRE_NATIVE_VALUE`, and/or
+  `TRIPWIRE_AAVE_V2_POOL`. With values, a swap or a borrow against fresh
+  collateral is not read as a drain. **Without them each asset is judged
+  alone, and value-neutral trades look like large outflows.** In the study
+  this produced false pauses on ordinary Curve and Aave activity; see
+  `docs/FALSE_POSITIVES.md`.
+- `TRIPWIRE_PROTOCOL_CONTRACTS`: your comptroller / router / registry, so a
+  callback out of the protocol and back in is recognised.
+
 ## Choosing a threshold
 
 `pause_threshold` is not a value this project can responsibly recommend

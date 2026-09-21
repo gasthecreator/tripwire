@@ -28,6 +28,12 @@ does pause (`a_drain_plus_any_single_supporting_fact_pauses`). This
 constrains weights: keep supporting facts light, and put the weight on the
 harm fact. Real exploits drove these numbers — see `WORKLOG.md`.
 
+Current supporting weights and their budget (all must sum below 80):
+oracle price deviation 25, flash-loan entrypoint 15, governance call
+sequence 15, reentrancy 10, protocol callback re-entry 10 = 75. Adding a
+new supporting fact means paying for it from this budget; the test above
+fails otherwise.
+
 Adding a new signature is adding a new file here — it never requires a
 Rust code change unless the signature needs a genuinely new
 `ConditionKind` the engine doesn't evaluate yet (in which case: add the

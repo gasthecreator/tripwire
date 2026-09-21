@@ -173,3 +173,54 @@ fn try_spawn_anvil_on(port: u16) -> Option<AnvilGuard> {
         .ok()?;
     Some(AnvilGuard { child, port })
 }
+
+#[tokio::test]
+async fn get_tx_event_matches_the_block_view_of_the_same_transaction() {
+    let Some(anvil) = try_spawn_anvil_on(8649) else {
+        eprintln!("SKIPPED: `anvil` not found on PATH");
+        return;
+    };
+    let rpc_url = anvil.rpc_url();
+    if !wait_for_anvil_ready(&rpc_url).await {
+        panic!("anvil did not become ready in time");
+    }
+    let signer: PrivateKeySigner =
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+            .parse()
+            .unwrap();
+    let recipient = address!("70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    let p = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(rpc_url.parse().unwrap());
+    let receipt = p
+        .send_transaction(
+            TransactionRequest::default()
+                .with_to(recipient)
+                .with_value(U256::from(7u64)),
+        )
+        .await
+        .unwrap()
+        .get_receipt()
+        .await
+        .unwrap();
+    let hash = format!("{:#x}", receipt.transaction_hash);
+
+    let adapter = EvmAdapter::connect(&rpc_url, ChainId(31337)).await.unwrap();
+    let single = adapter.get_tx_event(&hash).await.unwrap();
+    let from_block = adapter
+        .get_block_tx_events(receipt.block_number.unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.tx_hash == hash)
+        .unwrap();
+    assert_eq!(single, from_block);
+    assert_eq!(single.value_wei, 7);
+
+    // Unknown and malformed hashes are errors, never an empty event.
+    assert!(adapter
+        .get_tx_event(&format!("0x{}", "ab".repeat(32)))
+        .await
+        .is_err());
+    assert!(adapter.get_tx_event("not-a-hash").await.is_err());
+}

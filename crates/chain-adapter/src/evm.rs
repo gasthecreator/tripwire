@@ -3,7 +3,6 @@
 //! module in this crate, and everything in `detection`, is chain-agnostic
 //! and unaffected by what's in this file.
 
-use std::collections::HashMap;
 use std::str::FromStr;
 
 use alloy::consensus::Transaction as _;
@@ -217,43 +216,11 @@ impl ChainAdapter for EvmAdapter {
         let timestamp_unix = block.header.timestamp;
 
         let mut events = Vec::new();
-        // Cache decoded receipt logs per tx so a transaction with many
-        // internal calls doesn't refetch the same receipt repeatedly.
-        let mut receipt_log_cache: HashMap<String, Vec<LogEvent>> = HashMap::new();
-
         for tx in block.transactions.txns() {
-            let tx_hash = format!("{:#x}", tx.inner.tx_hash());
-            let from = CoreAddress::from_str(&format!("{:#x}", tx.inner.signer()))
-                .unwrap_or(CoreAddress::ZERO);
-            let to = tx
-                .inner
-                .to()
-                .and_then(|a| CoreAddress::from_str(&format!("{a:#x}")).ok());
-            let value_wei = tx.inner.value().to::<u128>();
-
-            let logs = match receipt_log_cache.get(&tx_hash) {
-                Some(l) => l.clone(),
-                None => {
-                    let fetched = self.fetch_receipt_logs(&tx_hash).await.unwrap_or_default();
-                    receipt_log_cache.insert(tx_hash.clone(), fetched.clone());
-                    fetched
-                }
-            };
-
-            let call_frames = self.try_get_call_frames(&tx_hash).await;
-
-            events.push(TxEvent {
-                chain: self.chain_id,
-                tx_hash,
-                block_number,
-                confirmations,
-                from,
-                to,
-                value_wei,
-                logs,
-                call_frames,
-                timestamp_unix,
-            });
+            events.push(
+                self.build_event(tx, block_number, confirmations, timestamp_unix)
+                    .await?,
+            );
         }
 
         Ok(events)
@@ -261,6 +228,75 @@ impl ChainAdapter for EvmAdapter {
 }
 
 impl EvmAdapter {
+    /// One transaction, by hash: its sender, block, receipt logs and (when
+    /// the node serves it) call trace. For tooling that samples individual
+    /// transactions (e.g. the false-positive study) rather than following
+    /// blocks.
+    pub async fn get_tx_event(&self, tx_hash: &str) -> Result<TxEvent, ChainAdapterError> {
+        let hash = alloy::primitives::TxHash::from_str(tx_hash)
+            .map_err(|e| ChainAdapterError::Decode(e.to_string()))?;
+        let tx = self
+            .provider
+            .get_transaction_by_hash(hash)
+            .await
+            .map_err(|e| ChainAdapterError::Transport(e.to_string()))?
+            .ok_or_else(|| ChainAdapterError::Decode(format!("transaction {tx_hash} not found")))?;
+        let block_number = tx.block_number.ok_or_else(|| {
+            ChainAdapterError::Decode(format!("transaction {tx_hash} is not mined yet"))
+        })?;
+        let block = self
+            .provider
+            .get_block_by_number(BlockNumberOrTag::Number(block_number))
+            .await
+            .map_err(|e| ChainAdapterError::Transport(e.to_string()))?
+            .ok_or(ChainAdapterError::BlockNotFound(block_number))?;
+        let head = self.latest_block_number().await?;
+        self.build_event(
+            &tx,
+            block_number,
+            head.saturating_sub(block_number),
+            block.header.timestamp,
+        )
+        .await
+    }
+
+    async fn build_event(
+        &self,
+        tx: &alloy::rpc::types::Transaction,
+        block_number: u64,
+        confirmations: u64,
+        timestamp_unix: u64,
+    ) -> Result<TxEvent, ChainAdapterError> {
+        let tx_hash = format!("{:#x}", tx.inner.tx_hash());
+        let from = CoreAddress::from_str(&format!("{:#x}", tx.inner.signer()))
+            .unwrap_or(CoreAddress::ZERO);
+        let to = tx
+            .inner
+            .to()
+            .and_then(|a| CoreAddress::from_str(&format!("{a:#x}")).ok());
+        let value_wei = u128::try_from(tx.inner.value()).unwrap_or(u128::MAX);
+
+        // A receipt that can't be read is an ERROR, not an empty log list:
+        // silently treating it as "no events" would blind the detector to
+        // exactly the fund movements it needs, i.e. fail open. Returning
+        // Err lets the caller (the engine's tick) retry.
+        let logs = self.fetch_receipt_logs(&tx_hash).await?;
+        let call_frames = self.try_get_call_frames(&tx_hash).await;
+
+        Ok(TxEvent {
+            chain: self.chain_id,
+            tx_hash,
+            block_number,
+            confirmations,
+            from,
+            to,
+            value_wei,
+            logs,
+            call_frames,
+            timestamp_unix,
+        })
+    }
+
     async fn fetch_receipt_logs(&self, tx_hash: &str) -> Result<Vec<LogEvent>, ChainAdapterError> {
         let hash = alloy::primitives::TxHash::from_str(tx_hash)
             .map_err(|e| ChainAdapterError::Decode(e.to_string()))?;
@@ -270,7 +306,9 @@ impl EvmAdapter {
             .await
             .map_err(|e| ChainAdapterError::Transport(e.to_string()))?;
         let Some(receipt) = receipt else {
-            return Ok(Vec::new());
+            return Err(ChainAdapterError::Decode(format!(
+                "no receipt for mined transaction {tx_hash} (node inconsistent or lagging)"
+            )));
         };
         Ok(receipt
             .inner

@@ -10,7 +10,9 @@ use tripwire_core::{CallFrame, ConditionKind, TxEvent};
 pub struct Baseline {
     /// The watched contract's balance (wei) at the start of the
     /// signature's evaluation window — the denominator for
-    /// `FundFlowDelta`.
+    /// `FundFlowDelta`. When the context source values assets it is in the
+    /// valuer's common *value unit* rather than raw token units; only the
+    /// ratio to `outflow_wei` is ever used.
     pub balance_baseline_wei: u128,
     /// Net value that left the watched contract during this transaction,
     /// as computed upstream from the raw call trace.
@@ -25,6 +27,11 @@ pub struct Baseline {
     pub voting_power_baseline: Option<f64>,
     /// Voting power for that same address after this transaction.
     pub observed_voting_power: Option<f64>,
+    /// Every contract that belongs to the protocol (markets, comptroller,
+    /// vaults, the target). Used to tell a callback *out of* the protocol
+    /// and back in from ordinary internal composition. Empty disables
+    /// `ProtocolCallbackReentry`.
+    pub protocol_addresses: Vec<tripwire_core::Address>,
 }
 
 /// Evaluates a single condition against one transaction and its
@@ -40,6 +47,9 @@ pub fn evaluate(kind: &ConditionKind, tx: &TxEvent, baseline: &Baseline) -> bool
         ConditionKind::CallAny { selectors } => evaluate_call_any(selectors, tx),
         ConditionKind::OraclePriceDeviation { threshold_pct } => {
             evaluate_oracle_price_deviation(*threshold_pct, baseline)
+        }
+        ConditionKind::ProtocolCallbackReentry {} => {
+            evaluate_protocol_callback_reentry(&baseline.protocol_addresses, tx)
         }
         ConditionKind::ReentrancyDepth { min_depth_delta } => {
             evaluate_reentrancy_depth(*min_depth_delta, tx)
@@ -140,6 +150,48 @@ fn evaluate_reentrancy_depth(min_depth_delta: u32, tx: &TxEvent) -> bool {
             });
             if reenters {
                 return true;
+            }
+        }
+        stack.push(frame);
+    }
+    false
+}
+
+/// Callback re-entry across protocol contracts. Walks the pre-order frame
+/// list keeping the active call stack (as `evaluate_reentrancy_depth`), and
+/// fires when a state-changing call into a protocol contract `f` has, among
+/// its active ancestors, both
+///
+/// * an earlier state-changing call `a` into a protocol contract, and
+/// * between `a` and `f`, a real (non-delegate, non-static) call whose
+///   target lies *outside* the protocol -- the call out of the protocol.
+///
+/// `DELEGATECALL` frames are internal to the protocol (proxy -> implementation)
+/// and are neither the outside contract nor a re-entry. Read-only calls are
+/// ignored on both sides.
+fn evaluate_protocol_callback_reentry(protocol: &[tripwire_core::Address], tx: &TxEvent) -> bool {
+    if protocol.is_empty() {
+        return false;
+    }
+    let inside = |a: &tripwire_core::Address| protocol.contains(a);
+    let mut stack: Vec<&CallFrame> = Vec::new();
+    for frame in &tx.call_frames {
+        while stack.last().is_some_and(|top| top.depth >= frame.depth) {
+            stack.pop();
+        }
+        if !frame.kind.is_static() && !frame.kind.is_delegate() && inside(&frame.to) {
+            // Find the shallowest active protocol call, then look for an
+            // outside call below it.
+            let first_in = stack
+                .iter()
+                .position(|a| !a.kind.is_static() && !a.kind.is_delegate() && inside(&a.to));
+            if let Some(i) = first_in {
+                let callout = stack[i + 1..]
+                    .iter()
+                    .any(|c| !c.kind.is_static() && !c.kind.is_delegate() && !inside(&c.to));
+                if callout {
+                    return true;
+                }
             }
         }
         stack.push(frame);
@@ -593,5 +645,100 @@ mod tests {
     #[test]
     fn governance_anomaly_fails_closed_when_data_missing() {
         assert!(!evaluate_governance_anomaly(1.0, &Baseline::default()));
+    }
+
+    // --- protocol callback re-entry ---
+
+    const MARKET: &str = "0x0000000000000000000000000000000000000010";
+    const COMPTROLLER: &str = "0x0000000000000000000000000000000000000011";
+    const IMPL: &str = "0x0000000000000000000000000000000000000012";
+    const ATTACKER: &str = "0x00000000000000000000000000000000000000aa";
+    const TOKEN: &str = "0x00000000000000000000000000000000000000bb";
+
+    fn protocol() -> Vec<Address> {
+        vec![
+            Address::from_str(MARKET).unwrap(),
+            Address::from_str(COMPTROLLER).unwrap(),
+        ]
+    }
+
+    fn cb(frames: Vec<CallFrame>) -> bool {
+        let mut tx = empty_tx();
+        tx.call_frames = frames;
+        evaluate_protocol_callback_reentry(&protocol(), &tx)
+    }
+
+    #[test]
+    fn callback_reentry_fires_on_the_rari_shape_through_a_proxy() {
+        // attacker -> market.borrow -> (delegatecall impl) -> attacker.receive
+        //          -> comptroller.exitMarket
+        assert!(cb(vec![
+            frame(0, ATTACKER, Some("0xstart")),
+            frame(1, MARKET, Some("0xborrow")),
+            frame_k(2, IMPL, Some("0xborrow"), CallKind::DelegateCall),
+            frame(3, ATTACKER, None),
+            frame(4, COMPTROLLER, Some("0xexitMarket")),
+        ]));
+    }
+
+    #[test]
+    fn callback_reentry_needs_a_call_out_of_the_protocol() {
+        // market -> comptroller is internal composition, not re-entry.
+        assert!(!cb(vec![
+            frame(0, ATTACKER, Some("0xstart")),
+            frame(1, MARKET, Some("0xborrow")),
+            frame(2, COMPTROLLER, Some("0xborrowAllowed")),
+        ]));
+        // Proxy -> implementation is not a call out either.
+        assert!(!cb(vec![
+            frame(0, MARKET, Some("0xborrow")),
+            frame_k(1, IMPL, Some("0xborrow"), CallKind::DelegateCall),
+            frame(2, COMPTROLLER, Some("0xborrowAllowed")),
+        ]));
+    }
+
+    #[test]
+    fn a_call_out_that_does_not_call_back_is_not_reentry() {
+        // market -> token.transfer, returns; later a separate protocol call.
+        assert!(!cb(vec![
+            frame(0, ATTACKER, Some("0xstart")),
+            frame(1, MARKET, Some("0xredeem")),
+            frame(2, TOKEN, Some("0xtransfer")),
+            frame(1, COMPTROLLER, Some("0xredeemVerify")),
+        ]));
+    }
+
+    #[test]
+    fn callback_reentry_ignores_read_only_calls_back_in() {
+        assert!(!cb(vec![
+            frame(0, MARKET, Some("0xborrow")),
+            frame(1, ATTACKER, None),
+            frame_k(
+                2,
+                COMPTROLLER,
+                Some("0xgetAccountLiquidity"),
+                CallKind::StaticCall
+            ),
+        ]));
+    }
+
+    #[test]
+    fn callback_reentry_is_inert_without_a_protocol_set() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, MARKET, Some("0xborrow")),
+            frame(1, ATTACKER, None),
+            frame(2, COMPTROLLER, Some("0xexitMarket")),
+        ];
+        assert!(!evaluate_protocol_callback_reentry(&[], &tx));
+    }
+
+    #[test]
+    fn callback_reentry_finds_the_same_function_too() {
+        assert!(cb(vec![
+            frame(0, MARKET, Some("0xborrow")),
+            frame(1, ATTACKER, None),
+            frame(2, MARKET, Some("0xborrow")),
+        ]));
     }
 }

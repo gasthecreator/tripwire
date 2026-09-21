@@ -96,6 +96,13 @@ impl CallKind {
     pub fn is_static(self) -> bool {
         matches!(self, CallKind::StaticCall)
     }
+
+    /// True for frames that run foreign code in the caller's context
+    /// (proxy -> implementation): internal to a contract, not a call to
+    /// another one.
+    pub fn is_delegate(self) -> bool {
+        matches!(self, CallKind::DelegateCall | CallKind::CallCode)
+    }
 }
 
 /// One frame of a transaction's internal call trace. Frames are stored
