@@ -60,6 +60,8 @@ sol! {
     interface ICToken { function underlying() external view returns (address); }
     #[sol(rpc)]
     interface ICurve3Pool { function coins(uint256 i) external view returns (address); }
+    #[sol(rpc)]
+    interface IErc20Meta { function decimals() external view returns (uint8); }
 }
 
 const TRANSFER: &str = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -236,6 +238,7 @@ async fn main() {
     let lo = env_u64("FP_LO", 17_000_000);
     let hi = env_u64("FP_HI", 20_500_000);
     let trace_cap = env_u64("FP_TRACE_CAP", 10) as usize;
+    let netting = env_u64("FP_NETTING", 1) != 0;
     let out_path = std::env::var("FP_OUT").unwrap_or_else(|_| "docs/FALSE_POSITIVES.md".into());
 
     // Retry with backoff on 429/transient errors: this runs against a metered
@@ -292,6 +295,48 @@ async fn main() {
             "Compound V2" => vec![COMPOUND_COMPTROLLER.parse().unwrap()],
             _ => vec![],
         };
+        // Value netting (default): a swap or a collateral-backed borrow is not
+        // a drain. Aave and Compound are valued by their own oracles at the
+        // block before each transaction; Curve 3pool's stablecoins at $1.
+        if netting {
+            let valuer: Arc<dyn tripwire_context::TokenValuer> = match proto.name {
+                "Aave V2" => Arc::new(
+                    tripwire_context::AaveV2Oracle::connect(&rpc, &AAVE_V2_POOL.parse().unwrap())
+                        .await
+                        .expect("aave oracle"),
+                ),
+                "Compound V2" => {
+                    let map = proto
+                        .tokens
+                        .iter()
+                        .zip(&proto.holders)
+                        .map(|(t, h)| (core(t), core(h)))
+                        .collect();
+                    Arc::new(
+                        tripwire_context::CompoundOracle::connect(
+                            &rpc,
+                            &COMPOUND_COMPTROLLER.parse().unwrap(),
+                            map,
+                        )
+                        .await
+                        .expect("compound oracle"),
+                    )
+                }
+                _ => {
+                    let mut f = tripwire_context::FixedValues::new();
+                    for t in &proto.tokens {
+                        let d = IErc20Meta::new(*t, &provider)
+                            .decimals()
+                            .call()
+                            .await
+                            .expect("decimals");
+                        f = f.with_stable(core(t), d);
+                    }
+                    Arc::new(f)
+                }
+            };
+            cfg.valuer = Some(valuer);
+        }
         let ctx = Arc::new(EvmContext::connect(&rpc, cfg).unwrap());
         let target = core(&proto.holders[0]);
 
@@ -475,7 +520,7 @@ If the shipped detector, configured for a real protocol, ran on that protocol's 
 - **Protocols** (discovered on-chain, not hard-coded): Aave V2 (every reserve's aToken as a custody contract, underlying as the watched asset), Compound V2 (every cToken with an ERC-20 underlying), Curve 3pool.
 - **Sample:** {n_windows} seeded-random windows of 10 blocks per protocol, drawn from blocks {lo}–{hi} (seed {seed}). For each, every ERC-20 transfer *out of* the protocol's custody contracts is collected; each distinct transaction is one member of the population.
 - **Why only transactions with an outflow:** a pause requires a fund-flow (\"harm\") fact — enforced by a test on the shipped signatures — so a transaction that moves nothing out of the protocol cannot pause it, whatever else it does.
-- **Scoring:** the production `tripwire-context` baseline (real balances at the previous block, ERC-20 logs net of inflows, Uniswap-V2 price movement) and the **shipped, un-tuned signatures** at the default threshold of 80.
+- **Scoring:** the production `tripwire-context` baseline (real balances at the previous block, {netting_desc}, Uniswap-V2 price movement) and the **shipped, un-tuned signatures** at the default threshold of 80.
 - **Traces:** only transactions that already have a fund-flow fact but sit below the threshold could be pushed over by a call-pattern fact (flash-loan entrypoint, re-entry), so only those were traced with `cast run`, largest first, capped at {trace_cap} per protocol.
 
 ## Results
@@ -502,6 +547,7 @@ Distribution of the largest single-asset outflow fraction over all sampled trans
 ",
         n_windows = n_windows, lo = lo, hi = hi, seed = seed, trace_cap = trace_cap,
         table = table,
+        netting_desc = if netting { "fund flow measured as net *value* lost across all the protocol's watched assets, valued at the block before each transaction: Aave V2 and Compound V2 by their own oracles, Curve 3pool's stablecoins at $1" } else { "ERC-20 logs net of inflows, one asset at a time" },
         trace_notes = trace_notes.join("\n"),
         b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4],
         paused = if paused_details.is_empty() { "None in the sample.".to_string() } else { paused_details.join("\n") },

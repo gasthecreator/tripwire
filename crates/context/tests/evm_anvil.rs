@@ -308,3 +308,185 @@ async fn a_failing_trace_fallback_degrades_to_no_trace_not_a_crash() {
         "scored without a trace, not aborted"
     );
 }
+
+// ---- value-netted fund flow -------------------------------------------------
+//
+// The per-asset rule reads a value-neutral swap as a drain (one asset leaves,
+// the other half of the trade is invisible). These tests run the same real
+// swap transaction through both views.
+
+struct SwapEnv {
+    _anvil: Anvil,
+    rpc: String,
+    out_token: AAddress,
+    in_token: AAddress,
+    vault: AAddress,
+    tx: TxEvent,
+}
+
+/// The vault holds 1000 of each of two tokens and trades 400 of A for
+/// `amount_in` of B with a counterparty, in one transaction.
+async fn swap_setup(port: u16, amount_in: u128) -> Option<SwapEnv> {
+    if !std::path::Path::new("../../contracts/out/Mocks.sol/MockVault.json").exists() {
+        eprintln!("SKIPPED: contracts not built -- run `forge build` in contracts/");
+        return None;
+    }
+    let child = Command::new("anvil")
+        .args(["--port", &port.to_string(), "--silent"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let anvil = Anvil(child);
+    let rpc = format!("http://127.0.0.1:{port}");
+    let reader = ProviderBuilder::new().connect_http(rpc.parse().unwrap());
+    for _ in 0..80 {
+        if reader.get_block_number().await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let signer: PrivateKeySigner = KEY.parse().unwrap();
+    let p = ProviderBuilder::new()
+        .wallet(EthereumWallet::from(signer))
+        .connect_http(rpc.parse().unwrap());
+    let a = MockERC20::deploy(&p).await.unwrap();
+    let b = MockERC20::deploy(&p).await.unwrap();
+    let vault = MockVault::deploy(&p).await.unwrap();
+    let trader: AAddress = "0x00000000000000000000000000000000000071ad"
+        .parse()
+        .unwrap();
+    macro_rules! send {
+        ($call:expr) => {
+            $call.send().await.unwrap().get_receipt().await.unwrap()
+        };
+    }
+    send!(a.mint(*vault.address(), U256::from(1_000 * ONE)));
+    send!(b.mint(*vault.address(), U256::from(1_000 * ONE)));
+    send!(b.mint(trader, U256::from(amount_in)));
+    let receipt = send!(vault.swap(
+        *a.address(),
+        *b.address(),
+        trader,
+        U256::from(400 * ONE),
+        U256::from(amount_in),
+    ));
+    let hash = format!("{:#x}", receipt.transaction_hash);
+    let adapter = EvmAdapter::connect(&rpc, ChainId(31337)).await.unwrap();
+    let tx = adapter
+        .get_block_tx_events(receipt.block_number.unwrap())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.tx_hash == hash)
+        .unwrap();
+    Some(SwapEnv {
+        _anvil: anvil,
+        rpc,
+        out_token: *a.address(),
+        in_token: *b.address(),
+        vault: *vault.address(),
+        tx,
+    })
+}
+
+fn swap_cfg(env: &SwapEnv) -> ContextConfig {
+    let mut cfg = ContextConfig::new(core(env.vault));
+    cfg.watched_tokens = vec![core(env.out_token), core(env.in_token)];
+    cfg
+}
+
+fn both_at_a_dollar(env: &SwapEnv) -> std::sync::Arc<dyn tripwire_context::TokenValuer> {
+    std::sync::Arc::new(
+        tripwire_context::FixedValues::new()
+            .with_stable(core(env.out_token), 18)
+            .with_stable(core(env.in_token), 18),
+    )
+}
+
+#[tokio::test]
+async fn a_value_neutral_swap_is_a_drain_per_asset_but_nothing_when_netted() {
+    let Some(env) = swap_setup(8681, 400 * ONE).await else {
+        return;
+    };
+    // Per-asset view (no valuer): 400 of 1000 left => a 40% "drain".
+    let plain = EvmContext::connect(&env.rpc, swap_cfg(&env)).unwrap();
+    let b = plain.baseline(&env.tx).await;
+    assert_eq!(b.outflow_wei, 400 * ONE);
+    assert_eq!(b.balance_baseline_wei, 1_000 * ONE);
+
+    // Netted view: 400 out, 400 of equal value in => no loss.
+    let mut cfg = swap_cfg(&env);
+    cfg.valuer = Some(both_at_a_dollar(&env));
+    let netted = EvmContext::connect(&env.rpc, cfg).unwrap();
+    let b = netted.baseline(&env.tx).await;
+    assert_eq!(b.outflow_wei, 0, "a fair trade lost no value");
+}
+
+#[tokio::test]
+async fn a_lopsided_swap_is_still_reported_as_a_loss() {
+    // 400 out, only 100 back: the protocol lost 300 of value.
+    let Some(env) = swap_setup(8682, 100 * ONE).await else {
+        return;
+    };
+    let mut cfg = swap_cfg(&env);
+    cfg.valuer = Some(both_at_a_dollar(&env));
+    let ctx = EvmContext::connect(&env.rpc, cfg).unwrap();
+    let b = ctx.baseline(&env.tx).await;
+    let lost = b.outflow_wei as f64 / b.balance_baseline_wei as f64;
+    assert!(
+        (lost - 0.3).abs() < 1e-6,
+        "lost {lost} of the asset's value"
+    );
+}
+
+#[tokio::test]
+async fn cheap_junk_deposited_against_a_drain_does_not_hide_it() {
+    // Same swap as the fair one, but the asset coming in is valued at a
+    // hundredth: 400 out for 400 worth $4 is a ~99% loss of that value.
+    let Some(env) = swap_setup(8683, 400 * ONE).await else {
+        return;
+    };
+    let mut cfg = swap_cfg(&env);
+    cfg.valuer = Some(std::sync::Arc::new(
+        tripwire_context::FixedValues::new()
+            .with_stable(core(env.out_token), 18)
+            .with_token(core(env.in_token), 18, 0.01),
+    ));
+    let ctx = EvmContext::connect(&env.rpc, cfg).unwrap();
+    let b = ctx.baseline(&env.tx).await;
+    let lost = b.outflow_wei as f64 / b.balance_baseline_wei as f64;
+    assert!(lost > 0.39, "value lost was {lost} of the drained asset");
+}
+
+#[tokio::test]
+async fn an_unvalued_asset_falls_back_to_the_strict_per_asset_rule() {
+    // Only the outgoing token has a value: the netted view is unavailable, so
+    // the transaction is judged per asset (a 40% drain), never guessed.
+    let Some(env) = swap_setup(8684, 400 * ONE).await else {
+        return;
+    };
+    let mut cfg = swap_cfg(&env);
+    cfg.valuer = Some(std::sync::Arc::new(
+        tripwire_context::FixedValues::new().with_stable(core(env.out_token), 18),
+    ));
+    let ctx = EvmContext::connect(&env.rpc, cfg).unwrap();
+    let b = ctx.baseline(&env.tx).await;
+    assert_eq!(b.outflow_wei, 400 * ONE);
+    assert_eq!(b.balance_baseline_wei, 1_000 * ONE);
+}
+
+#[tokio::test]
+async fn a_pure_drain_is_unchanged_by_having_a_valuer() {
+    let Some(env) = setup(8685).await else { return };
+    let mut cfg = config(&env);
+    cfg.valuer = Some(std::sync::Arc::new(
+        tripwire_context::FixedValues::new().with_stable(core(env.token), 18),
+    ));
+    let ctx = EvmContext::connect(&env.rpc, cfg).unwrap();
+    let b = ctx.baseline(&env.tx).await;
+    // Value units now (a $1 token: 600 and 1000 dollars), so compare the
+    // fraction, which is all the detector uses.
+    let lost = b.outflow_wei as f64 / b.balance_baseline_wei as f64;
+    assert!((lost - 0.6).abs() < 1e-9, "{lost}");
+}

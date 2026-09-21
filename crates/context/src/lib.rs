@@ -10,5 +10,7 @@ pub mod amm;
 pub mod cast_trace;
 pub mod evm;
 pub mod outflow;
+pub mod value;
 
 pub use evm::{ContextConfig, EvmContext, TraceFallback};
+pub use value::{AaveV2Oracle, CompoundOracle, FixedValues, TokenValuer};
