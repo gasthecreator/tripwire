@@ -234,7 +234,11 @@ async fn main() {
         return;
     };
     let seed = env_u64("FP_SEED", 20_260_921);
-    let n_windows = env_u64("FP_WINDOWS", 2_500) as usize;
+    let n_windows = if std::env::var("FP_ONLY_TXS").is_ok_and(|v| !v.is_empty()) {
+        0 // rescore mode: no sampling
+    } else {
+        env_u64("FP_WINDOWS", 2_500) as usize
+    };
     let lo = env_u64("FP_LO", 17_000_000);
     let hi = env_u64("FP_HI", 20_500_000);
     let trace_cap = env_u64("FP_TRACE_CAP", 10) as usize;
@@ -283,6 +287,25 @@ async fn main() {
             eprintln!("   INCOMPLETE: {failed_windows} windows could not be fetched");
             incomplete = true;
         }
+        // FP_ONLY_TXS=0xhash,0xhash: rescore exactly these transactions (to
+        // re-check previously flagged ones) instead of the sampled windows.
+        let only: Vec<String> = std::env::var("FP_ONLY_TXS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        let restricted = !only.is_empty();
+        let txs = if restricted {
+            let mut m = BTreeMap::new();
+            for h in &only {
+                let t = adapter.get_tx_event(h).await.expect("tx");
+                m.insert(h.clone(), t.block_number);
+            }
+            m
+        } else {
+            txs
+        };
         println!("   {} distinct transactions with an outflow", txs.len());
 
         let mut cfg = ContextConfig::new(core(&proto.holders[0]));
@@ -384,6 +407,15 @@ async fn main() {
                     };
                     let keys: Vec<String> =
                         d.counted_evidence.iter().map(|e| e.key.clone()).collect();
+                    if restricted {
+                        println!(
+                            "   RESCORE {} outflow {:.1}% confidence {:.0} evidence {:?}",
+                            hash,
+                            fraction * 100.0,
+                            d.confidence.value(),
+                            keys
+                        );
+                    }
                     Some(Sampled {
                         outcome: Outcome {
                             protocol: name,
@@ -476,6 +508,18 @@ async fn main() {
             }
         }
         let beyond_cap = cand.len().saturating_sub(trace_cap);
+        let untraced = cand.len() - n_traced;
+        let n_pop = sampled.len() as u64;
+        let paused_now = sampled.iter().filter(|x| x.outcome.paused).count() as u64;
+        let (_, worst_hi) = study::wilson_interval(paused_now + untraced as u64, n_pop, 1.96);
+        trace_notes.push(format!(
+            "  - {}: WORST CASE if every untraced candidate had paused: {}/{} = {:.3}% (95% upper {:.3}%).",
+            proto.name,
+            paused_now + untraced as u64,
+            n_pop,
+            100.0 * (paused_now + untraced as u64) as f64 / n_pop.max(1) as f64,
+            100.0 * worst_hi,
+        ));
         trace_notes.push(format!(
             "  - {}: {} candidates below the threshold with a fund-flow fact; {} traced; {} untraced ({} beyond the cap of {}, {} failed after retries, {} skipped after the {}s time budget).",
             proto.name, cand.len(), n_traced, cand.len() - n_traced, beyond_cap, trace_cap, n_failed, n_out_of_time, budget.as_secs()

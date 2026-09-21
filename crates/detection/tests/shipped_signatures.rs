@@ -239,3 +239,44 @@ fn a_drain_plus_any_single_supporting_fact_pauses() {
         d.confidence.value()
     );
 }
+
+/// Evidence is shared across signatures (one `fund_flow` fact, however many
+/// conditions match it), so the *lowest* fund-flow threshold in the shipped
+/// set is the harm threshold for every transaction, whatever the signature
+/// that carries it is about. A 5% threshold in `reentrancy-basic` once made a
+/// 6% withdrawal alongside a flash loan reach the pause threshold on ordinary
+/// Aave traffic (docs/FALSE_POSITIVES.md). Keep them aligned.
+#[test]
+fn no_shipped_fund_flow_threshold_is_lower_than_the_harm_floor() {
+    const HARM_FLOOR_PCT: f64 = 15.0;
+    for sig in shipped() {
+        for c in &sig.conditions {
+            if let ConditionKind::FundFlowDelta { threshold_pct } = c.kind {
+                assert!(
+                    threshold_pct >= HARM_FLOOR_PCT,
+                    "{}/{} has a fund-flow threshold of {threshold_pct}%, below the {HARM_FLOOR_PCT}% floor",
+                    sig.id,
+                    c.id
+                );
+            }
+        }
+    }
+}
+
+/// The other side: a transaction that drains a real fraction still pauses.
+#[test]
+fn a_six_percent_withdrawal_with_a_flash_loan_does_not_pause_but_a_thirty_percent_one_does() {
+    let flash = || tx(vec![frame(0, "0xab9c4b5d", CallKind::Call)]);
+    let d = run(&flash(), &outflow_pct(6));
+    assert!(
+        !d.should_pause(),
+        "6% + flash loan scored {}",
+        d.confidence.value()
+    );
+    let d = run(&flash(), &outflow_pct(30));
+    assert!(
+        d.should_pause(),
+        "30% + flash loan scored {}",
+        d.confidence.value()
+    );
+}
