@@ -8,4 +8,5 @@
 //! live in `tests/`.
 
 pub use tripwire_context::cast_trace;
+pub mod study;
 pub mod support;
