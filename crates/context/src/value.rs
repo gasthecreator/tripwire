@@ -75,6 +75,24 @@ impl TokenValuer for FixedValues {
     }
 }
 
+/// Tries each valuer in order and returns the first answer, so operator-fixed
+/// values (pegs) can take precedence over an oracle, or an oracle can be
+/// supplemented with a fixed native-ETH price.
+#[derive(Debug, Default)]
+pub struct Layered(pub Vec<std::sync::Arc<dyn TokenValuer>>);
+
+#[async_trait]
+impl TokenValuer for Layered {
+    async fn unit_value(&self, token: &Address, block: u64) -> Option<f64> {
+        for v in &self.0 {
+            if let Some(x) = v.unit_value(token, block).await {
+                return Some(x);
+            }
+        }
+        None
+    }
+}
+
 sol! {
     #[sol(rpc)]
     interface IERC20Decimals {
@@ -304,6 +322,24 @@ mod tests {
 
     fn a(s: &str) -> Address {
         s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn layered_returns_the_first_answer_and_none_when_nobody_knows() {
+        let t1 = a("0x00000000000000000000000000000000000000a1");
+        let t2 = a("0x00000000000000000000000000000000000000a2");
+        let t3 = a("0x00000000000000000000000000000000000000a3");
+        let first = FixedValues::new().with_token(t1, 0, 5.0);
+        let second = FixedValues::new()
+            .with_token(t1, 0, 9.0)
+            .with_token(t2, 0, 7.0);
+        let l = Layered(vec![
+            std::sync::Arc::new(first),
+            std::sync::Arc::new(second),
+        ]);
+        assert_eq!(l.unit_value(&t1, 1).await, Some(5.0)); // first wins
+        assert_eq!(l.unit_value(&t2, 1).await, Some(7.0)); // falls through
+        assert_eq!(l.unit_value(&t3, 1).await, None);
     }
 
     #[tokio::test]
