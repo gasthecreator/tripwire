@@ -30,7 +30,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(count = signatures.len(), dir = %signatures_dir.display(), "loaded signatures");
 
     let adapter = EvmAdapter::connect(&rpc_url, chain_id).await?;
-    let guardian = guardian_client::connect(&rpc_url, &guardian_address, &pauser_key).await?;
+    let policy = guardian_client::SubmitPolicy {
+        priority_fee_multiplier_pct: env_or("TRIPWIRE_PAUSE_PRIORITY_MULTIPLIER_PCT", "200")
+            .parse()?,
+        min_priority_fee_wei: gwei_to_wei(&env_or("TRIPWIRE_PAUSE_MIN_PRIORITY_GWEI", "2"))?,
+        max_fee_ceiling_wei: gwei_to_wei(&env_or("TRIPWIRE_PAUSE_MAX_FEE_GWEI", "500"))?,
+        attempt_timeout: Duration::from_secs(
+            env_or("TRIPWIRE_PAUSE_ATTEMPT_TIMEOUT_SECS", "6").parse()?,
+        ),
+        max_attempts: env_or("TRIPWIRE_PAUSE_MAX_ATTEMPTS", "6").parse()?,
+        ..Default::default()
+    };
+    tracing::info!(?policy, "pause submission policy");
+    let guardian = guardian_client::connect(&rpc_url, &guardian_address, &pauser_key)
+        .await?
+        .with_policy(policy);
 
     if !guardian.is_target_registered(&target_contract).await? {
         anyhow::bail!(
@@ -131,6 +145,16 @@ fn parse_addresses(csv: &str) -> anyhow::Result<Vec<Address>> {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.into())
+}
+
+/// Parses a (possibly fractional) gwei amount into wei.
+fn gwei_to_wei(s: &str) -> anyhow::Result<u128> {
+    let g: f64 = s.trim().parse()?;
+    anyhow::ensure!(
+        g.is_finite() && g >= 0.0,
+        "gwei amount must be finite and non-negative: {s}"
+    );
+    Ok((g * 1e9).round() as u128)
 }
 
 /// Optional asset valuation, so fund flow is measured as net *value* lost

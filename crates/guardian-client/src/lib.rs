@@ -7,7 +7,9 @@
 //! get the transaction signed, submitted, and confirmed, and report
 //! back honestly what happened.
 
+use alloy::network::TransactionBuilder as _;
 use std::str::FromStr;
+use std::time::Duration;
 
 use alloy::network::EthereumWallet;
 use alloy::primitives::Address as AlloyAddress;
@@ -44,6 +46,49 @@ pub enum GuardianClientError {
     Submission(String),
 }
 
+/// How aggressively a pause transaction is priced and re-sent.
+///
+/// Gas *cost* is irrelevant next to the loss a pause prevents (a pause is
+/// ~60k gas, see `docs/GAS.md`), but *inclusion* is not: during a live
+/// exploit blockspace is contested, and a default-fee transaction can sit in
+/// the mempool while the drain continues. So the default is to overpay on
+/// the priority fee and, if the transaction is not mined promptly, replace it
+/// (same nonce) with a higher-fee one until something lands.
+#[derive(Debug, Clone)]
+pub struct SubmitPolicy {
+    /// Multiplier (percent) applied to the node's estimated priority fee.
+    pub priority_fee_multiplier_pct: u64,
+    /// Floor for the priority fee, in wei.
+    pub min_priority_fee_wei: u128,
+    /// How long to wait for any attempt to be mined before bumping.
+    pub attempt_timeout: Duration,
+    /// Total attempts, including the first.
+    pub max_attempts: u32,
+    /// Fee increase (percent) per replacement. Nodes require > 12.5% on both
+    /// fee fields to accept a same-nonce replacement.
+    pub bump_pct: u64,
+    /// Hard ceiling on `max_fee_per_gas`, in wei: bounds what a bug or a
+    /// fee spike can make the hot wallet spend.
+    pub max_fee_ceiling_wei: u128,
+}
+
+impl Default for SubmitPolicy {
+    fn default() -> Self {
+        Self {
+            priority_fee_multiplier_pct: 200,
+            min_priority_fee_wei: 2_000_000_000,
+            attempt_timeout: Duration::from_secs(6),
+            max_attempts: 6,
+            bump_pct: 30,
+            max_fee_ceiling_wei: 500_000_000_000,
+        }
+    }
+}
+
+fn bump(v: u128, pct: u64) -> u128 {
+    v.saturating_mul(100 + pct as u128) / 100 + 1
+}
+
 /// Generic over the provider type deliberately: alloy's `ProviderBuilder`
 /// output (a chain of `JoinFill`-nested gas/nonce/chain-id/wallet
 /// fillers over a `RootProvider`) is a real but unnameable type, and
@@ -59,6 +104,7 @@ pub enum GuardianClientError {
 /// flow it doesn't participate in (ARCHITECTURE.md §3.4).
 pub struct GuardianClient<P: Provider> {
     contract: IGuardian::IGuardianInstance<P>,
+    policy: SubmitPolicy,
 }
 
 impl<P: Provider> GuardianClient<P> {
@@ -71,7 +117,14 @@ impl<P: Provider> GuardianClient<P> {
             .map_err(|e| GuardianClientError::InvalidAddress(e.to_string()))?;
         Ok(Self {
             contract: IGuardian::new(address, provider),
+            policy: SubmitPolicy::default(),
         })
+    }
+
+    /// Replaces the fee/replacement policy used by `submit_pause`.
+    pub fn with_policy(mut self, policy: SubmitPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Submits the pause transaction for `decision` and waits for it to
@@ -82,6 +135,15 @@ impl<P: Provider> GuardianClient<P> {
     pub async fn submit_pause(
         &self,
         decision: &PauseDecision,
+    ) -> Result<String, GuardianClientError> {
+        self.submit_pause_with(decision, &self.policy).await
+    }
+
+    /// As `submit_pause`, with an explicit fee/replacement policy.
+    pub async fn submit_pause_with(
+        &self,
+        decision: &PauseDecision,
+        policy: &SubmitPolicy,
     ) -> Result<String, GuardianClientError> {
         if !decision.should_pause() {
             return Err(GuardianClientError::BelowThreshold);
@@ -101,17 +163,115 @@ impl<P: Provider> GuardianClient<P> {
                 .join(",")
         );
 
-        let pending = self
-            .contract
-            .pause(target, reason)
-            .send()
+        let provider = self.contract.provider();
+        let est = provider
+            .estimate_eip1559_fees()
             .await
-            .map_err(|e| GuardianClientError::Submission(e.to_string()))?;
+            .map_err(|e| GuardianClientError::Submission(format!("fee estimation: {e}")))?;
+        let mut prio = (est.max_priority_fee_per_gas * policy.priority_fee_multiplier_pct as u128
+            / 100)
+            .max(policy.min_priority_fee_wei);
+        let mut max_fee = est
+            .max_fee_per_gas
+            .saturating_add(prio.saturating_sub(est.max_priority_fee_per_gas))
+            .max(prio)
+            .min(policy.max_fee_ceiling_wei);
+        prio = prio.min(max_fee);
 
-        let receipt = pending
-            .get_receipt()
-            .await
-            .map_err(|e| GuardianClientError::Submission(e.to_string()))?;
+        let mut hashes = Vec::new();
+        let mut nonce_from: Option<(u64, AlloyAddress, u64)> = None;
+        let mut last_err = String::new();
+        let mut receipt = None;
+
+        for attempt in 0..policy.max_attempts.max(1) {
+            let mut req = self
+                .contract
+                .pause(target, reason.clone())
+                .into_transaction_request()
+                .with_max_fee_per_gas(max_fee)
+                .with_max_priority_fee_per_gas(prio);
+            if let Some((nonce, from, gas)) = nonce_from {
+                // Reuse the first attempt's nonce and gas limit. Re-estimating
+                // gas would run against pending state in which the first
+                // attempt has *already paused the target*, so the estimate
+                // reverts (EnforcedPause) and the replacement is never sent.
+                req = req.with_nonce(nonce).with_from(from).with_gas_limit(gas);
+            }
+            match provider.send_transaction(req).await {
+                Ok(pending) => {
+                    let hash = *pending.tx_hash();
+                    hashes.push(hash);
+                    if nonce_from.is_none() {
+                        if let Ok(Some(tx)) = provider.get_transaction_by_hash(hash).await {
+                            use alloy::consensus::Transaction as _;
+                            nonce_from = Some((tx.nonce(), tx.inner.signer(), tx.gas_limit()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // A replacement can be rejected (underpriced) or find its
+                    // nonce already used because an earlier attempt mined;
+                    // fall through to the receipt check either way.
+                    last_err = e.to_string();
+                    tracing::warn!(attempt, error = %last_err, "pause submission attempt failed");
+                    if hashes.is_empty() {
+                        // Nothing is in flight, so there is nothing to wait
+                        // for or replace: a revert at estimation, a bad
+                        // nonce, an unreachable node. Fail now, not after
+                        // every attempt timeout.
+                        return Err(GuardianClientError::Submission(last_err));
+                    }
+                }
+            }
+
+            // Wait for *any* attempt to land: an earlier, lower-fee attempt
+            // mining is as good as the latest one.
+            let deadline = tokio::time::Instant::now() + policy.attempt_timeout;
+            'wait: loop {
+                for h in &hashes {
+                    if let Ok(Some(r)) = provider.get_transaction_receipt(*h).await {
+                        receipt = Some(r);
+                        break 'wait;
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            if receipt.is_some() {
+                break;
+            }
+
+            tracing::warn!(
+                attempt,
+                prio,
+                max_fee,
+                "pause not mined in time; bumping fees"
+            );
+            if max_fee >= policy.max_fee_ceiling_wei {
+                last_err = format!("fee ceiling {} wei reached", policy.max_fee_ceiling_wei);
+                break;
+            }
+            prio = bump(prio, policy.bump_pct);
+            max_fee = bump(max_fee, policy.bump_pct)
+                .max(prio)
+                .min(policy.max_fee_ceiling_wei);
+            prio = prio.min(max_fee);
+        }
+
+        let receipt = receipt.ok_or_else(|| {
+            GuardianClientError::Submission(format!(
+                "pause not mined after {} attempt(s): {last_err}",
+                hashes.len()
+            ))
+        })?;
+        if !receipt.status() {
+            return Err(GuardianClientError::Submission(format!(
+                "pause transaction {:#x} reverted",
+                receipt.transaction_hash
+            )));
+        }
 
         tracing::info!(
             tx_hash = %receipt.transaction_hash,

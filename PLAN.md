@@ -259,6 +259,18 @@ before merge, docs updated in the same PR as the code they describe.
       stateful invariant suite (mutation-checked); gas figures in
       `docs/GAS.md`. Slither not run locally (not installed); CI runs it.
 
+- [x] **Pause fee policy (inclusion latency).** `guardian-client` no longer
+      sends one default-fee transaction and waits forever. `SubmitPolicy`
+      overpays the priority fee (default 2x the estimate, 2 gwei floor), waits
+      per attempt, and replaces a stuck pause at the same nonce with +30%
+      fees, tracking every attempt so an earlier one mining still counts; a
+      hard `max_fee_ceiling` bounds the hot wallet's spend, and a revert at
+      estimation fails immediately. Tested on anvil with automine off (stuck
+      tx replaced, exactly one nonce consumed, fee bumped, ceiling respected).
+      Configurable via `TRIPWIRE_PAUSE_*`. **Not tested:** behaviour on a real
+      congested mainnet or against private-mempool/builder submission
+      (Flashbots-style), which is the next step for real contested blocks.
+
 ## Open questions
 
 - **Archive RPC access:** Gideon needs to sign up for Alchemy (or
