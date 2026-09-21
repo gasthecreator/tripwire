@@ -118,7 +118,7 @@ before merge, docs updated in the same PR as the code they describe.
       bounded catch-up), with 19 in-memory state-machine tests and 3
       live-`anvil` tests including a real reorg.
 - [ ] **Slice 6 — Historical exploit replay harness.** Foundry fork tests
-      against real mainnet history. **Status: two of four done.**
+      against real mainnet history. **Status: three of four done.**
       Beanstalk Farms (Apr 17, 2022) is verified — tx
       `0xcd314668aaa9bbfebaf1a0bd2b6553d01dd58899c508d4729fa7311dc5d33ad7`,
       block 14602790, confirmed directly against Etherscan on
@@ -140,11 +140,22 @@ before merge, docs updated in the same PR as the code they describe.
       Solidity replay asserts Euler's DAI balance 8,904,507 -> 0; Rust
       replay (`tests/euler_flash_loan_drain.rs`, real 151-frame trace,
       real fund-flow `Baseline` from archive balance + receipt logs)
-      scores an incident-tuned signature at 95.0 vs 80.0. The remaining
-      two signature-diversity slots (oracle manipulation — candidate
-      Cream Finance Oct 2021; reentrancy — candidate dForce Apr 2020 or
-      Fei/Rari Apr 2022) are still explicitly-skipped placeholder tests
-      rather than filled with unverified hashes. **Scoring flaw found on Euler, now fixed:** the shipped generic
+      scores an incident-tuned signature at 95.0 vs 80.0. **Third case
+      verified 2026-09-21: Warp Finance (Dec 17, 2020), the oracle-
+      manipulation slot** — tx `0x8bb8dc5c…95090`, block 11473330. Etherscan
+      gives it no label and the write-ups omit the hash, so it was found by
+      block timestamp (exactly 22:24:41 UTC, Warp's published attack time)
+      and the Uniswap V2 DAI/WETH pair's `Sync` events (a 341,217 WETH
+      swap), then corroborated by matching the published figures against the
+      receipt (94,349.3 LP minted, 3.86M DAI and 3.92M USDC borrowed from
+      two `WarpVaultSC` contracts). **Generic detection result on all three
+      real exploits:** the *shipped, un-tuned* signatures pause on
+      Beanstalk (100), Euler (85) and Warp (100), configured with only each
+      protocol's own asset list, and adversarial variants (a lone drain, a
+      price move alone, call patterns alone) stay below threshold. The
+      remaining signature-diversity slot (reentrancy — candidate dForce
+      Apr 2020 or Fei/Rari Apr 2022) is still an explicitly-skipped
+      placeholder test rather than filled with an unverified hash. **Scoring flaw found on Euler, now fixed:** the shipped generic
       signatures scored 100.0 on it, but only because a single fact (the
       large outflow) satisfied a condition in three different signatures
       and was summed three times — so any legitimate withdrawal above
@@ -188,13 +199,30 @@ before merge, docs updated in the same PR as the code they describe.
       `benign_transaction_produces_zero_confidence`) but these are
       synthetic fixtures, not real historical high-volume traffic —
       don't conflate the two when citing a false-positive rate.
-- [ ] **Slice 8 — Real baseline sourcing.** Not started. The daemon's
-      `Baseline` (balance history, reference price/TWAP, governance
-      voting-power lookups) is currently `Baseline::default()` —
-      detection and scoring are fully real, but this input isn't sourced
-      from live chain state yet. Needs to be scoped per-protocol
-      (`docs/INTEGRATION.md`'s "Signature customization" section already
-      flags this) rather than solved generically.
+- [x] **Slice 8 — Real baseline sourcing (mostly).** New
+      `tripwire-context` crate, wired into the daemon
+      (`TRIPWIRE_WATCHED_TOKENS`, `TRIPWIRE_EXTRA_HOLDERS`,
+      `TRIPWIRE_WATCH_NATIVE`, `TRIPWIRE_TRACK_AMM_PRICES`,
+      `TRIPWIRE_TRACE_FALLBACK`): **fund flow** = the worst single-asset
+      drain (fraction of the balance that left), from ERC-20 `Transfer`
+      logs net of inflows (so a repaid flash loan nets out) against the
+      holder's balance at the *previous block*, plus native ETH from the
+      call trace; **price movement** = the largest relative spot-price move
+      of any Uniswap-V2-style pool in the transaction, from `Sync` events
+      against `getReserves` at the previous block; **call traces** from the
+      node when it serves them, else optionally `cast run` (slow but works
+      on any archive RPC). Everything fails closed (a value that can't be
+      read is left unset, never guessed). Pure arithmetic is unit-tested
+      (23 tests); the RPC layer is tested on a live `anvil` with mock
+      contracts (9 tests: real historical `eth_call`s, ERC-20 and native
+      outflow, price move, fail-closed paths); and it runs on three real
+      exploits (below). **Not done:** governance voting-power sourcing
+      (`GovernanceProposalAnomaly` still has no baseline source);
+      non-Uniswap-V2 price oracles (Curve, Uniswap V3, Chainlink) — note
+      the Harvest Finance (Curve) exploit moved swap execution prices only
+      0.03-0.05%, so a price-deviation percentage cannot catch that class
+      and it needs a different signal; the `cast run` fallback is too slow
+      for a latency-critical path (use a trace-capable or local node).
 - [ ] **Slice 9 — Observability.** Structured logging exists (every
       signature match, every decision, tracing spans in the daemon) but
       metrics export and alerting hooks (SECURITY.md T3: the listener's

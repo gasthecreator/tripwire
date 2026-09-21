@@ -1,0 +1,22 @@
+[package]
+name = "tripwire-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "tripwire_context"
+
+[dependencies]
+tripwire-core.workspace = true
+detection.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+async-trait = "0.1"
+alloy = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+chain-adapter.workspace = true
+tokio = { workspace = true, features = ["test-util", "process"] }

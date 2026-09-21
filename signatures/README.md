@@ -16,6 +16,18 @@ never carry a weight at or above your pause threshold unless you mean a
 lone observation to pause; corroboration comes from *different* kinds of
 evidence. The decision's `counted_evidence` shows exactly what counted.
 
+**The harm rule (enforced by tests).** A pause needs evidence of actual
+harm — funds leaving a watched contract, or voting power taken. Call
+patterns (re-entry, flash-loan entrypoints, call sequences) and price
+movement are common in legitimate transactions (chained flash swaps
+re-enter their own callback in ordinary arbitrage; whales move thin
+pools), so *all evidence without a harm fact, summed, must stay below the
+default pause threshold* (`evidence_without_a_harm_fact_can_never_reach_
+the_default_threshold`), while a harm fact plus any single supporting fact
+does pause (`a_drain_plus_any_single_supporting_fact_pauses`). This
+constrains weights: keep supporting facts light, and put the weight on the
+harm fact. Real exploits drove these numbers — see `WORKLOG.md`.
+
 Adding a new signature is adding a new file here — it never requires a
 Rust code change unless the signature needs a genuinely new
 `ConditionKind` the engine doesn't evaluate yet (in which case: add the

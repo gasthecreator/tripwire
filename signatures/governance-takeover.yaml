@@ -22,4 +22,5 @@ conditions:
       # filled in per protocol's actual governor contract during
       # onboarding (docs/INTEGRATION.md).
       selectors: ["0xda95691a", "0xfe0d94c1"]
-    weight: 30.0
+    # Light on purpose (see reentrancy-basic.yaml).
+    weight: 15.0

@@ -1,26 +1,41 @@
-# A flash loan followed, within the same transaction, by a large outflow
-# from the watched contract. Neither signal alone is unusual -- flash
-# loans and large withdrawals both happen legitimately (arbitrage,
-# large depositor exits) -- the combination within one atomic
-# transaction is the anomaly. Historical precedent: Euler Finance
-# (Mar 2023), PancakeBunny (May 2021).
+# A flash loan followed, within the same atomic transaction, by a large
+# outflow from the watched contract. Neither signal alone is unusual --
+# flash loans and large withdrawals both happen legitimately (arbitrage,
+# large depositor exits) -- the combination is the anomaly. Historical
+# precedent: Euler Finance (Mar 2023), Warp Finance (Dec 2020), PancakeBunny
+# (May 2021).
+#
+# The entrypoint list is the set of well-known, explicit flash-loan
+# functions. Only the Aave V2/V3 `flashLoan` selector (0xab9c4b5d) has been
+# validated against real exploit traces in this repo (Euler, Beanstalk);
+# the rest are computed from the documented interface signatures:
+#   0x5cffe9de  ERC-3156  flashLoan(address,address,uint256,bytes)   (also MakerDAO DssFlash)
+#   0xab9c4b5d  Aave V2/V3 flashLoan(address,address[],uint256[],uint256[],address,bytes,uint16)
+#   0x42b0b77c  Aave V3   flashLoanSimple(address,address,uint256,bytes,uint16)
+#   0x5c38449e  Balancer  flashLoan(address,address[],uint256[],bytes)
+#   0x490e6cbc  Uniswap V3 flash(address,uint256,uint256,bytes)
+# Deliberately NOT listed: Uniswap V2 flash swaps and dYdX `operate`. Both
+# use selectors that also serve ordinary swaps/margin operations, so the
+# selector alone says nothing. Detecting them takes a different signal.
 id: flash-loan-drain
 description: >
-  A borrow/flashLoan-shaped call followed by a large, same-transaction
-  outflow from the watched contract's balance.
+  A call to a well-known flash-loan entrypoint, together with a large
+  same-transaction outflow of a watched asset from the protected contract.
 category: flash_loan_drain
 window_seconds: 1
 conditions:
   - id: flash-loan-entrypoint
     kind:
-      type: call_sequence
-      # ERC-3156 flashLoan(address,address,uint256,bytes) selector,
-      # placeholder for the protocol-specific borrow entrypoint that
-      # would be filled in per deployment during onboarding.
-      selectors: ["0x5cffe9de"]
-    weight: 25.0
+      type: call_any
+      selectors:
+        - "0x5cffe9de"
+        - "0xab9c4b5d"
+        - "0x42b0b77c"
+        - "0x5c38449e"
+        - "0x490e6cbc"
+    weight: 15.0
   - id: large-outflow
     kind:
       type: fund_flow_delta
       threshold_pct: 20.0
-    weight: 60.0
+    weight: 70.0

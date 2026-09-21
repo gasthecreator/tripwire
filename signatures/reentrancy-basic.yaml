@@ -18,9 +18,15 @@ conditions:
     kind:
       type: reentrancy_depth
       min_depth_delta: 1
-    weight: 65.0
+    # Deliberately light. Call-pattern and price evidence are common in
+    # legitimate transactions -- nested flash-swap callbacks re-enter
+    # themselves in ordinary arbitrage, whales move thin pools -- so all
+    # evidence *without* a harm fact (funds leaving, voting power taken)
+    # combined must stay below a pause threshold. Enforced by
+    # tests/shipped_signatures.rs.
+    weight: 15.0
   - id: outflow-during-reentry
     kind:
       type: fund_flow_delta
       threshold_pct: 5.0
-    weight: 30.0
+    weight: 70.0

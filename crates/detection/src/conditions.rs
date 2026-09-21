@@ -37,6 +37,7 @@ pub fn evaluate(kind: &ConditionKind, tx: &TxEvent, baseline: &Baseline) -> bool
             evaluate_fund_flow_delta(*threshold_pct, baseline)
         }
         ConditionKind::CallSequence { selectors } => evaluate_call_sequence(selectors, tx),
+        ConditionKind::CallAny { selectors } => evaluate_call_any(selectors, tx),
         ConditionKind::OraclePriceDeviation { threshold_pct } => {
             evaluate_oracle_price_deviation(*threshold_pct, baseline)
         }
@@ -78,6 +79,17 @@ fn evaluate_call_sequence(selectors: &[String], tx: &TxEvent) -> bool {
             .iter()
             .zip(selectors.iter())
             .all(|(o, s)| o.eq_ignore_ascii_case(s))
+    })
+}
+
+fn evaluate_call_any(selectors: &[String], tx: &TxEvent) -> bool {
+    // An empty set can never be satisfied: "any of nothing" is false, so a
+    // misconfigured signature fails closed instead of matching everything.
+    tx.call_frames.iter().any(|f| {
+        f.kind.is_message_call()
+            && f.selector
+                .as_deref()
+                .is_some_and(|s| selectors.iter().any(|w| w.eq_ignore_ascii_case(s)))
     })
 }
 
@@ -291,6 +303,44 @@ mod tests {
     fn call_sequence_no_match_on_empty_call_frames() {
         let tx = empty_tx();
         assert!(!evaluate_call_sequence(&["0xaaaaaaaa".into()], &tx));
+    }
+
+    // --- call_any ---
+
+    #[test]
+    fn call_any_matches_when_any_listed_selector_is_called() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![
+            frame(0, VAULT, Some("0xaaaaaaaa")),
+            frame(1, VAULT, Some("0xbbbbbbbb")),
+        ];
+        assert!(evaluate_call_any(
+            &["0xbbbbbbbb".into(), "0xcccccccc".into()],
+            &tx
+        ));
+        assert!(
+            evaluate_call_any(&["0xBBBBBBBB".into()], &tx),
+            "case-insensitive"
+        );
+    }
+
+    #[test]
+    fn call_any_does_not_match_unlisted_selectors_or_empty_sets() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![frame(0, VAULT, Some("0xaaaaaaaa"))];
+        assert!(!evaluate_call_any(&["0xdddddddd".into()], &tx));
+        assert!(!evaluate_call_any(&[], &tx), "an empty set fails closed");
+        assert!(
+            !evaluate_call_any(&["0xaaaaaaaa".into()], &empty_tx()),
+            "no frames"
+        );
+    }
+
+    #[test]
+    fn call_any_ignores_create_frames_whose_data_is_initcode() {
+        let mut tx = empty_tx();
+        tx.call_frames = vec![frame_k(0, VAULT, Some("0x60806040"), CallKind::Create)];
+        assert!(!evaluate_call_any(&["0x60806040".into()], &tx));
     }
 
     // --- oracle price deviation ---

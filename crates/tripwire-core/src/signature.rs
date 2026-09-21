@@ -55,6 +55,12 @@ pub enum ConditionKind {
     /// Fires if the transaction's flattened selector sequence contains
     /// `selectors` as a contiguous, in-order subsequence.
     CallSequence { selectors: Vec<String> },
+    /// Fires if any message call in the transaction targets one of
+    /// `selectors` — an *any-of* set, unlike `CallSequence`'s ordered
+    /// pattern. For families with several equivalent entrypoints, e.g. the
+    /// well-known flash-loan functions of Aave, Balancer, Uniswap V3 and
+    /// ERC-3156 lenders.
+    CallAny { selectors: Vec<String> },
     /// Fires if an oracle-reporting call's price deviates from a
     /// reference price (a TWAP, or a second independent oracle) by more
     /// than `threshold_pct` within the window.
@@ -96,6 +102,13 @@ impl ConditionKind {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            ConditionKind::CallAny { selectors } => {
+                // A set: order and case don't matter.
+                let mut s: Vec<String> = selectors.iter().map(|s| s.to_ascii_lowercase()).collect();
+                s.sort();
+                s.dedup();
+                format!("call_any:{}", s.join(","))
+            }
             ConditionKind::OraclePriceDeviation { .. } => "oracle_price_deviation".into(),
             ConditionKind::ReentrancyDepth { .. } => "reentrancy".into(),
             ConditionKind::GovernanceProposalAnomaly { .. } => "governance_voting_power".into(),
@@ -237,5 +250,43 @@ conditions:
         assert_eq!(lower.evidence_key(), upper.evidence_key());
         assert_ne!(lower.evidence_key(), other.evidence_key());
         assert_ne!(ordered.evidence_key(), reversed.evidence_key());
+    }
+
+    #[test]
+    fn call_any_evidence_key_is_order_and_case_insensitive() {
+        let a = ConditionKind::CallAny {
+            selectors: vec!["0xBB".into(), "0xaa".into()],
+        };
+        let b = ConditionKind::CallAny {
+            selectors: vec!["0xaa".into(), "0xbb".into(), "0xAA".into()],
+        };
+        assert_eq!(a.evidence_key(), b.evidence_key());
+        let seq = ConditionKind::CallSequence {
+            selectors: vec!["0xaa".into(), "0xbb".into()],
+        };
+        assert_ne!(a.evidence_key(), seq.evidence_key());
+    }
+
+    #[test]
+    fn call_any_parses_from_yaml() {
+        let yaml = r#"
+id: flash
+description: any flash loan
+category: flash_loan_drain
+window_seconds: 1
+conditions:
+  - id: any
+    kind:
+      type: call_any
+      selectors: ["0x5cffe9de", "0xab9c4b5d"]
+    weight: 25.0
+"#;
+        let sig: Signature = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            sig.conditions[0].kind,
+            ConditionKind::CallAny {
+                selectors: vec!["0x5cffe9de".into(), "0xab9c4b5d".into()]
+            }
+        );
     }
 }

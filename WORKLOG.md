@@ -24,6 +24,54 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-21] Real baselines, a third exploit (Warp Finance), and generic detection on all three
+
+**Author:** Claude Code
+
+**What:** (1) New `tripwire-context` crate = the production `ContextSource`
+(trait moved into `detection` to avoid a dependency cycle): worst-asset
+outflow fraction vs the holder's balance at block-1 (ERC-20 logs net of
+inflows; native ETH from the trace), Uniswap-V2 spot-price movement from
+`Sync` events vs `getReserves` at block-1, optional `cast run` trace
+fallback (moved from replay-harness), multi-holder support, everything
+failing closed. Wired into the daemon via env vars; the daemon warns
+loudly if no watched assets are configured. (2) `CallAny` condition (any-of
+selector set) and a rewritten `flash-loan-drain.yaml` covering the
+well-known flash-loan entrypoints (only Aave's `0xab9c4b5d` validated on
+real traces; the others computed from documented interfaces). (3) Third
+real exploit, the oracle-manipulation slot: **Warp Finance** (Dec 2020),
+identified by block timestamp + Uniswap `Sync` events and corroborated
+against the published amounts. My first oracle candidate, Harvest Finance,
+turned out useless for this: its Curve swaps executed only 0.03-0.05% off
+parity, so a price-deviation percentage can't detect that class — a real
+limitation, recorded, not papered over. (4) The replay tests now use the
+production context, and score the **shipped, un-tuned** signatures.
+
+**Result:** generic signatures pause on Beanstalk (100), Euler (85) and
+Warp (100) with only each protocol's asset list configured.
+
+**Two more scoring-policy bugs surfaced on the way, both by scoring real
+data:** adding flash-loan evidence let call-pattern facts alone (re-entry
+65 + flash entrypoint 25 = 90) pause Beanstalk with no fund movement; and
+on Warp a price move (55) + a re-entry (30) = 85 paused with the drain
+removed. Fix: an enforced "harm rule" — all evidence lacking a harm fact
+(funds/voting power) must sum below the threshold — with weights retuned
+(fund flow 70; price 30; re-entry, flash entrypoint, call sequence 15
+each), plus a test that a harm fact plus any single supporting fact still
+pauses so the invariant isn't met by making everything too weak.
+
+**Verified:** 23 pure-logic tests + 9 live-anvil tests for the context
+crate; 3 live mainnet replays each asserting generic pause AND the
+adversarial variants (lone drain, price-only, no-baseline call patterns)
+staying below threshold; 169 Rust tests, clippy/fmt clean. Every token
+address configured for a replay was checked on-chain first.
+
+**Honest limits:** three exploits are three data points, and the
+false-positive rate on legitimate traffic is still unmeasured (next).
+Governance voting-power sourcing and non-V2 oracles aren't implemented.
+
+---
+
 ## [2026-09-21] The daemon was broken: rewrite as a reorg-aware engine, test on a real chain
 
 **Author:** Claude Code

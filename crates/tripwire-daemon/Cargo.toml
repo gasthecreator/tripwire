@@ -17,6 +17,7 @@ tripwire-core.workspace = true
 chain-adapter.workspace = true
 detection.workspace = true
 guardian-client.workspace = true
+tripwire-context.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

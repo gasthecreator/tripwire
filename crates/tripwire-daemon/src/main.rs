@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chain_adapter::evm::EvmAdapter;
-use tripwire_core::{ChainId, Confidence};
-use tripwire_daemon::{Engine, EngineConfig, NoContext};
+use tripwire_context::{ContextConfig, EvmContext, TraceFallback};
+use tripwire_core::{Address, ChainId, Confidence};
+use tripwire_daemon::{Engine, EngineConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,16 +39,52 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let target: Address = target_contract.parse()?;
     let mut cfg = EngineConfig::new(
         chain_id,
-        target_contract.parse()?,
+        target,
         Confidence::new(env_or("TRIPWIRE_PAUSE_THRESHOLD", "80").parse()?),
     );
     cfg.min_confirmations = env_or("TRIPWIRE_MIN_CONFIRMATIONS", "1").parse()?;
     cfg.reorg_window = env_or("TRIPWIRE_REORG_WINDOW", "64").parse()?;
     cfg.max_blocks_per_tick = env_or("TRIPWIRE_MAX_BLOCKS_PER_TICK", "32").parse()?;
 
-    let mut engine = Engine::new(adapter, guardian, NoContext, signatures, cfg);
+    // What the protocol custodies. Without this the fund-flow conditions
+    // (the "harm" evidence a pause needs) can never be satisfied, and the
+    // daemon can only act on call-pattern evidence, which by design stays
+    // below the pause threshold. So refuse to run silently blind.
+    let watched_tokens = parse_addresses(&env_or("TRIPWIRE_WATCHED_TOKENS", ""))?;
+    let extra_holders = parse_addresses(&env_or("TRIPWIRE_EXTRA_HOLDERS", ""))?;
+    let watch_native = env_or("TRIPWIRE_WATCH_NATIVE", "false").parse::<bool>()?;
+    if watched_tokens.is_empty() && !watch_native {
+        tracing::warn!(
+            "TRIPWIRE_WATCHED_TOKENS is empty and TRIPWIRE_WATCH_NATIVE is false: fund-flow evidence is \
+             disabled, so this daemon can essentially never reach the pause threshold"
+        );
+    }
+
+    let mut holders = vec![target];
+    holders.extend(extra_holders);
+    cfg.watched_addresses = holders.clone();
+
+    let mut ctx_cfg = ContextConfig::new(target);
+    ctx_cfg.holders = holders;
+    ctx_cfg.watched_tokens = watched_tokens;
+    ctx_cfg.watch_native = watch_native;
+    ctx_cfg.track_amm_prices = env_or("TRIPWIRE_TRACK_AMM_PRICES", "true").parse::<bool>()?;
+    ctx_cfg.trace_fallback = match env_or("TRIPWIRE_TRACE_FALLBACK", "none").as_str() {
+        "none" => TraceFallback::None,
+        "cast_run" => TraceFallback::CastRun {
+            rpc_url: rpc_url.clone(),
+            timeout: Duration::from_secs(env_or("TRIPWIRE_TRACE_TIMEOUT_SECS", "90").parse()?),
+        },
+        other => {
+            anyhow::bail!("TRIPWIRE_TRACE_FALLBACK must be `none` or `cast_run`, got `{other}`")
+        }
+    };
+    let context = EvmContext::connect(&rpc_url, ctx_cfg).map_err(anyhow::Error::msg)?;
+
+    let mut engine = Engine::new(adapter, guardian, context, signatures, cfg);
     tracing::info!(?poll_interval, "tripwire daemon started");
 
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
@@ -76,6 +113,17 @@ async fn main() -> anyhow::Result<()> {
 
 fn require_env(key: &str) -> anyhow::Result<String> {
     std::env::var(key).map_err(|_| anyhow::anyhow!("missing required environment variable: {key}"))
+}
+
+fn parse_addresses(csv: &str) -> anyhow::Result<Vec<Address>> {
+    csv.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<Address>()
+                .map_err(|e| anyhow::anyhow!("bad address `{s}`: {e}"))
+        })
+        .collect()
 }
 
 fn env_or(key: &str, default: &str) -> String {
