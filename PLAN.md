@@ -282,22 +282,24 @@ before merge, docs updated in the same PR as the code they describe.
 
 ## Open questions
 
-- **Archive RPC access:** Gideon needs to sign up for Alchemy (or
-  Infura/QuickNode) — not something this session could do on his
-  behalf. Blocks completing Slice 6/7 and running `foundry-ci.yml`'s
-  replay job in CI. Everything else is unblocked and already green.
-- **Confirm the remaining two historical exploits' exact transaction
-  hashes** (an oracle-manipulation case, a reentrancy case) against Etherscan directly before writing their replay tests —
-  do not reuse a web-search-summarized hash without independently
-  fetching and confirming it against the block explorer itself; this
-  session caught one real instance of a search-summary tool inventing a
-  plausible-but-wrong block number (14,895,611 instead of the actual
-  14,602,790 for the Beanstalk transaction) that only surfaced because
-  the actual Etherscan page was fetched directly afterward.
-- **GitHub remote:** not yet created. Propose
-  `github.com/gasthecreator/tripwire` (matching the other two portfolio
-  repos' naming pattern) once Gideon confirms public vs. private
-  visibility.
-- Wire Slice 6's replayed fork call-trace through the real `detection`
-  crate (see Slice 6 above) — this is the highest-value remaining piece
-  for the brief's core "prove detection would have fired" claim.
+All the items originally listed here (archive-RPC access, confirming the
+Beanstalk hash, creating the GitHub remote, wiring the fork replay into the
+real detection engine) were resolved early and this section was never
+updated — a docs-hygiene gap in itself. What's actually still open, as of
+this entry:
+
+- **CI replay jobs don't run.** `rust-ci.yml`'s and `foundry-ci.yml`'s replay
+  jobs are gated on an `ETH_RPC_URL` secret and a `RUN_REPLAY_TESTS` repo
+  variable, neither configured. Every replay test in this repo (Beanstalk,
+  Euler, Warp, Rari) has been run and passes locally against a real archive
+  node, but none of that runs automatically. Needs Gideon to add the secret.
+- **Governance voting-power sourcing** is unimplemented; `governance-takeover.yaml`'s
+  first condition can't be evaluated from live chain state today.
+- **Non-Uniswap-V2 oracles** (Curve, Uniswap V3, Chainlink) are out of scope
+  for `tripwire-context`'s price tracking.
+- **False-positive coverage** is three protocols (Aave V2, Compound V2, Curve
+  3pool) in one block range; see Slice 7 above for what that does and doesn't
+  show.
+- **Nothing here has been audited.** Guardian.sol is built on OpenZeppelin
+  primitives and has a mutation-checked invariant suite, but that is not a
+  substitute for an independent audit.

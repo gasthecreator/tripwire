@@ -24,6 +24,140 @@ Newest entries at the top.
 
 ---
 
+## [2026-09-22] Fill the Solidity-side reentrancy replay placeholder with the real Rari/Fei Fuse exploit
+
+**Author:** Claude Code
+
+**What:** `contracts/test/replay/HistoricalExploits.t.sol` had an explicit,
+labeled placeholder for the reentrancy signature-diversity slot ("Block
+number and transaction hash NOT YET VERIFIED"). The Rari/Fei Fuse exploit
+(Apr 30, 2022) had already been found, verified against Etherscan, and
+replayed on the Rust side (`crates/replay-harness/tests/rari_fuse_reentrancy.rs`)
+earlier this session; this fills the matching Solidity gap with the same
+transaction, using the same transaction-aware-fork pattern as the existing
+Euler test. Removed the separate oracle-manipulation placeholder rather than
+filling it with a third case: that exploit class (a swap moving a pool's
+relative price) doesn't fit this file's before/after-`balanceOf` assertion
+shape and is already covered end-to-end by the Warp Finance Rust replay.
+Also rewrote `PLAN.md`'s "Open questions" section, which was entirely
+stale — every item in it (archive-RPC access, confirming a hash, creating
+the GitHub remote, wiring the fork replay) had been resolved for days
+without the section being updated — with what's actually still open today.
+
+**Why:** a placeholder that says "not yet verified" is honest, but leaving
+it unfilled after the real exploit was already found and verified elsewhere
+in the same session was an oversight, not a hard blocker. A stale "open
+questions" list actively misleads a reader into re-litigating settled work.
+
+**Verified:** `forge test` on the real archive fork (via the local
+rate-limit-retrying proxy built for the FP study): `fUSDC-127`'s USDC cash
+goes from 7,144,266.341363 to exactly 0 within the attack transaction,
+matching the balance the Rust replay's `EvmContext` independently computed.
+All three Solidity replay tests (Beanstalk, Euler, Rari) pass together.
+
+## [2026-09-21] Listener liveness, metrics and alerting (SECURITY T3)
+
+**Author:** Claude Code
+
+**What:** `tripwire_daemon::health`: health states (never ticked / stalled /
+failing / chain not advancing / pause failing), a Prometheus `/metrics` +
+JSON `/status` + `/healthz` endpoint, a watchdog task independent of the
+detection loop that alerts on transitions, worsening reasons and reminders
+(webhook + always-logged), and a per-tick timeout.
+
+**Why:** SECURITY.md's T3 threat (the listener silently going dark while
+every dashboard still reads "nothing found") had no mitigation. The
+watchdog runs in its own task deliberately: the failure it exists to catch
+(a tick hung on an RPC call) is exactly the one the main loop cannot report
+about itself.
+
+**Verified:** 15 unit/socket tests (an injected clock, a real TCP endpoint,
+a webhook against a local server and a dead one), plus the real daemon
+binary against a live `anvil`: healthy, then the chain killed underneath
+it — `/healthz` went 503 and an ALERT was logged. Caught a stale-binary
+mistake during that check (`cargo test` does not rebuild the bin); the first
+smoke run had exercised old code and was rerun after an explicit build.
+Known gap: nothing detects an RPC serving a plausible but false chain.
+
+## [2026-09-21] Pause transaction fee policy: escalate and replace a stuck pause
+
+**Author:** Claude Code
+
+**What:** `guardian-client`'s `submit_pause` sent one provider-default-fee
+transaction and waited indefinitely. Added `SubmitPolicy`: overpays the
+priority fee, replaces a stuck pause at the same nonce with bumped fees per
+attempt, tracks every attempt so an earlier one landing still counts, and a
+hard fee ceiling bounds the hot wallet's spend.
+
+**Why:** fine on a quiet chain, but unsafe exactly when it matters — a pause
+competing with an attacker's own transactions for the next block. Gas cost
+itself is not the bottleneck (a pause is ~60k gas); inclusion latency is.
+
+**Verified:** on `anvil` with automine off. Two real bugs found by these
+tests, not by reasoning: (1) a replacement's gas re-estimation ran against
+pending state in which the first attempt had already paused the target, so
+it reverted with `EnforcedPause` — fixed by reusing the first attempt's gas
+limit; (2) a hard failure at estimation burned every attempt's timeout
+before returning — fixed to return immediately. Untested: real mainnet
+congestion, private-mempool/builder submission.
+
+## [2026-09-21] False-positive study: what it found, and the mistakes on the way
+
+**Author:** Claude Code
+
+**What:** `replay-harness`'s `fp_study`: seeded random 10-block windows
+across three real protocols (Aave V2, Compound V2, Curve 3pool), scoring
+every sampled ERC-20 outflow with the production context and the shipped
+signatures, tracing candidates with `cast run`.
+
+**Why:** the project had detected real exploits but never measured how
+often it would wrongly pause ordinary traffic — the other half of a
+usable detector.
+
+**Verified/found:** the first complete run would have paused 8 of 1,855
+legitimate transactions. Two causes, both design flaws, not tuning: (a)
+fund flow looked at one asset and never at what came back — fixed with
+value-netted fund flow (prices from the block before the tx, only watched
+assets netted, falls back to the strict rule when a price is missing); (b)
+evidence is shared across signatures, so the lowest fund-flow threshold
+anywhere (5%, in `reentrancy-basic`) became the harm threshold everywhere —
+fixed by aligning all shipped thresholds at 15% with a guard test. A
+mistake worth keeping on record: an intermediate run reported "0
+would-pause" while 8 Aave candidates sat untraced, and one of those was
+still a real false pause — caught only by rescoring the eight known
+transactions directly rather than trusting the summary table. The runner
+now traces every candidate it can, reports untraced ones per protocol, and
+prints a worst-case bound. Earlier still, rate limiting silently produced
+empty samples that read as "no outflows"; every RPC call now goes through a
+retrying proxy, and a run that loses data refuses to publish. The final
+result — 0 would-pause, every candidate traced — was in-sample (the fixes
+were made after seeing those transactions); a different-seed holdout run
+(1,771 fresh transactions, every candidate traced) also found 0 would-pause,
+which shows the fixes aren't overfit to one sample, not that the rate holds
+on other protocols or eras.
+
+## [2026-09-21] Guardian hardening: deploy script, registerTarget checks, invariant tests
+
+**Author:** Claude Code
+
+**What:** `registerTarget` now rejects a non-contract or a contract without
+`paused()`; `script/DeployGuardian.sol` deploys with role separation and
+re-verifies the resulting on-chain state; 14 deploy tests, 3 registerTarget
+tests, and a 7-invariant stateful fuzz suite.
+
+**Why:** the deploy-time mistakes this catches (an EOA admin, a hot wallet
+holding a governance role, a too-short timelock delay, a misregistered
+target) are exactly the ones that would only surface at the worst possible
+moment — during a real pause.
+
+**Verified:** a first invariant version failed on my own handler bug (an
+admin legitimately granting a role to the 'attacker' actor recorded as an
+illegal grant); the invariant was corrected to "every role holder was
+granted by an admin," not weakened. Mutation-checked afterward: two
+deliberate bugs in `Guardian.sol` (letting the pauser unpause; removing the
+pause role check) each make the suite fail. 37 Foundry tests pass. Slither
+was not run locally (not installed); it runs in CI.
+
 ## [2026-09-21] Real baselines, a third exploit (Warp Finance), and generic detection on all three
 
 **Author:** Claude Code
@@ -470,25 +604,3 @@ this entry.
 **Open, blocking Slices 2/6:** Gideon needs to sign up for an archive-RPC
 provider (Alchemy recommended) — not something this session can do on his
 behalf. Everything else can proceed without it.
-
-
-## Guardian hardening
-
-Added deploy-time safety (`registerTarget` checks, `DeployGuardian.sol` with post-condition verification), 14 deploy tests, 3 registerTarget tests, and a 7-invariant stateful fuzz suite. A first invariant version failed on my own handler bug (an admin legitimately granting a role to the 'attacker' actor); the invariant was corrected to 'every role holder was granted by an admin' rather than weakened. Mutation check: two deliberate Guardian bugs each caused a failure. Slither was not available locally, so it has not been run on this change. 37 Foundry tests pass.
-
-## False-positive study: what it found, and the mistakes on the way
-
-The study did its job: it found that the detector would have paused 8 legitimate transactions out of 1,855. Two causes, both design flaws rather than tuning: (a) fund flow looked at one asset and never at what came back (fixed with value netting, prices from the block before the tx, only watched assets netted, fallback to the strict rule when a price is missing); (b) evidence is shared across signatures, so the lowest fund-flow threshold anywhere (5%, in reentrancy-basic) became the harm threshold everywhere (fixed by aligning at 15% with a guard test).
-
-Mistakes worth keeping: I reported "0 would-pause" from a run in which 8 Aave candidates were never traced, and one of those was still a false pause. It was caught only because I rescored the eight known transactions directly instead of trusting the summary. The runner now traces every candidate, lists untraced ones per protocol, and prints a worst-case bound. Earlier still, rate limiting silently produced empty samples that read as "no outflows"; every RPC call now goes through a retrying proxy, and a run that loses data refuses to publish.
-
-The final result was in-sample. The different-seed holdout (1,771 fresh transactions, every candidate traced) also found 0 would-pause. That is what it can show: the fixes are not overfit to one sample. It cannot show the rate on other protocols or other eras.
-
-## Pause fee policy
-
-Found that `submit_pause` used provider-default fees and waited indefinitely: fine on a quiet chain, unsafe when the pause competes with an attacker's transactions. Added `SubmitPolicy` with fee escalation and same-nonce replacement. Two bugs found by the anvil tests rather than by reasoning: (1) replacements failed because gas estimation runs against pending state in which the first attempt has already paused the target, so the estimate reverted with `EnforcedPause`; fixed by reusing the first attempt's gas limit. (2) a revert at estimation burned every attempt timeout before returning; a failed first send now returns immediately. Untested: real mainnet congestion and private-mempool submission.
-
-
-## Liveness and metrics
-
-Built the T3 mitigation the docs had promised. Design choice worth recording: the watchdog is a separate task from the detection loop, because the failure it must catch (a tick hung on an RPC call) is exactly the one the loop cannot report about itself. Also added a per-tick timeout for the same reason. Smoke-tested the actual binary against anvil (healthy, then chain killed: 503 plus an ALERT log). Caught a stale-binary mistake during that test (cargo test does not rebuild the bin), so the first smoke run exercised old code; rerun after an explicit build. Known gap: nothing detects a plausible-but-false RPC.
